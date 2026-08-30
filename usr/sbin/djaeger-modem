@@ -1,0 +1,65 @@
+#!/bin/sh
+. /usr/lib/djaeger-modem/common.sh
+VERSION='1.1'
+REPO_RAW='https://raw.githubusercontent.com/Djaeger1/DJAEGER-Modem-Intelligence/main'
+cmd="$1"
+case "$cmd" in
+ status|health|'')
+   if [ ! -f "$STATE" ]; then echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; fi
+   . "$STATE"
+   cat <<EOF
+DJAEGER MODEM INTELLIGENCE v1.1
+State       : $state
+Health      : $score/100
+Cause       : $cause
+Confidence  : $confidence%
+Modem       : $([ "$modem" = 1 ] && echo ONLINE || echo OFFLINE)
+Service     : $service
+SIM         : $sim
+WAN IP      : ${wan_ip:-NONE}
+RSRP        : ${rsrp:-NA}
+RSRQ        : ${rsrq:-NA}
+RSSI        : ${rssi:-NA}
+SINR        : ${sinr:-NA}
+PCI         : ${pci:-NA}
+Cell ID     : ${cell_id:-NA}
+Gateway     : $([ "$gateway" = 1 ] && echo OK || echo FAIL)
+Internet    : $([ "$internet" = 1 ] && echo OK || echo FAIL)
+DNS         : $([ "$dns" = 1 ] && echo OK || echo FAIL)
+Self-Heal   : $([ "$self_heal" = 1 ] && echo ENABLED-L1 || echo LOCKED)
+Last Action : ${last_action:-NONE}
+Recoveries  : ${recovery_count:-0}/hour-window
+EOF
+ ;;
+ incidents) tail -n 20 "$INCIDENTS" 2>/dev/null || echo 'No incidents yet' ;;
+ telemetry) tail -n 20 "$RING" 2>/dev/null || echo 'No telemetry yet' ;;
+ logs) tail -n 50 "$LOG" 2>/dev/null || echo 'No logs yet' ;;
+ version) echo "DJAEGER Modem Intelligence v$VERSION" ;;
+ check-update)
+   REMOTE="$(wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n ')"
+   [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }
+   echo "Installed: $VERSION"; echo "Available: $REMOTE"
+   [ "$REMOTE" = "$VERSION" ] && echo 'Status: up to date' || echo 'Status: update available'
+   ;;
+ update)
+   TMP=/tmp/djaeger-modem-update.sh
+   echo 'Downloading DJAEGER installer...'
+   wget -qO "$TMP" --timeout=15 "$REPO_RAW/install.sh" || { echo 'Update download failed'; rm -f "$TMP"; exit 1; }
+   grep -q '^DJAEGER_INSTALLER_ID=DJAEGER_MODEM_INTELLIGENCE$' "$TMP" || { echo 'Installer identity check failed'; rm -f "$TMP"; exit 1; }
+   chmod 700 "$TMP" && sh "$TMP" --update
+   RC=$?; rm -f "$TMP"; exit $RC
+   ;;
+ rollback)
+   [ -d /root/djaeger-modem/rollback ] || { echo 'No rollback snapshot available'; exit 1; }
+   /etc/init.d/djaeger-modem stop >/dev/null 2>&1 || true
+   for F in usr/sbin/djaeger-modem usr/sbin/djaeger-modemd usr/lib/djaeger-modem/common.sh etc/init.d/djaeger-modem etc/config/djaeger_modem; do
+     [ -f "/root/djaeger-modem/rollback/$F" ] && { mkdir -p "/$(dirname "$F")"; cp -f "/root/djaeger-modem/rollback/$F" "/$F"; }
+   done
+   chmod 755 /usr/sbin/djaeger-modem /usr/sbin/djaeger-modemd /etc/init.d/djaeger-modem 2>/dev/null
+   /etc/init.d/djaeger-modem enable >/dev/null 2>&1 || true
+   /etc/init.d/djaeger-modem start
+   echo 'Rollback restored. Run: djaeger-modem status'
+   ;;
+ start|stop|restart) /etc/init.d/djaeger-modem "$cmd" ;;
+ *) echo 'Usage: djaeger-modem {status|health|incidents|telemetry|logs|version|check-update|update|rollback|start|stop|restart}'; exit 2 ;;
+esac
