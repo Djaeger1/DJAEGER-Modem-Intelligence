@@ -19,9 +19,11 @@ get etc/init.d/djaeger-monitor-bridge "$TMP/djaeger-monitor-bridge"
 sh -n "$TMP/monitor-bridge.sh"; sh -n "$TMP/djaeger-monitor-bridge"
 grep -q '^STATE=/tmp/djaeger-modem/state$' "$TMP/monitor-bridge.sh"
 ! grep -Eq 'IMEI|IMSI|ICCID|serial|mac=' "$TMP/monitor-bridge.sh" || { echo 'Privacy audit failed'; exit 1; }
-install -m 755 "$TMP/monitor-bridge.sh" /usr/lib/djaeger-modem/monitor-bridge.sh
-install -m 755 "$TMP/djaeger-monitor-bridge" /etc/init.d/djaeger-monitor-bridge
-mkdir -p /www/djaeger-modem
+# BusyBox/OpenWrt images may not provide GNU/coreutils install(1).
+mkdir -p /usr/lib/djaeger-modem /etc/init.d /www/djaeger-modem
+cp -f "$TMP/monitor-bridge.sh" /usr/lib/djaeger-modem/monitor-bridge.sh
+cp -f "$TMP/djaeger-monitor-bridge" /etc/init.d/djaeger-monitor-bridge
+chmod 755 /usr/lib/djaeger-modem/monitor-bridge.sh /etc/init.d/djaeger-monitor-bridge
 /etc/init.d/djaeger-monitor-bridge enable
 /etc/init.d/djaeger-monitor-bridge restart
 sleep 2
