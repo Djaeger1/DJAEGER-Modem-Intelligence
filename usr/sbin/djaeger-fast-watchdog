@@ -1,30 +1,31 @@
 #!/bin/sh
-# DJAEGER Fast Watchdog: standby-only connectivity reflex.
+# DJAEGER Fast Watchdog v2: standby sensor + Local AI policy executor.
 STATE=/tmp/djaeger-fast-watchdog.state
+POLICY=/tmp/djaeger-local-ai.policy
 AI=/tmp/djaeger-modem/state
+LOCALAI=/usr/lib/djaeger-modem/local-ai-policy.sh
 SLEEP=${DJAEGER_WATCHDOG_INTERVAL:-1}
+umask 077
 probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
-write_state(){ printf 'state=%s\nupdated=%s\nlast_action=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
-local_ai_action(){ DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"; case "$DOMAIN" in OPENWRT_DNS|DNS_UPSTREAM) echo DNSMASQ_RESTART;; OPENWRT_SYSTEM) echo NETIFD_RESTART;; CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) echo MODEM_REBOOT;; *) echo WAN_RECONNECT;; esac; }
-exec_action(){ A="$1"; case "$A" in WAN_RECONNECT) ifup wan >/dev/null 2>&1;; DNSMASQ_RESTART) /etc/init.d/dnsmasq restart >/dev/null 2>&1;; NETIFD_RESTART) /etc/init.d/network restart >/dev/null 2>&1;; MODEM_REBOOT) . /usr/lib/djaeger-modem/common.sh; . /usr/lib/djaeger-modem/recovery.sh; ROOT_DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"; recover_modem_reboot >/dev/null 2>&1;; esac; LAST_ACTION="$A"; }
-LAST_ACTION=NONE; write_state STANDBY
+kv(){ sed -n "s/^$1=//p" "$POLICY" 2>/dev/null | head -n1; }
+valid_action(){ case "$1" in WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;; *) return 1;; esac; }
+write_state(){ printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=LOCAL_AI\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" > "$STATE.tmp"; chmod 600 "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+exec_action(){ A="$1"; valid_action "$A" || return 1; case "$A" in WAN_RECONNECT) ifup wan >/dev/null 2>&1;; DNSMASQ_RESTART) /etc/init.d/dnsmasq restart >/dev/null 2>&1;; NETIFD_RESTART) /etc/init.d/network restart >/dev/null 2>&1;; MODEM_REBOOT) . /usr/lib/djaeger-modem/common.sh; . /usr/lib/djaeger-modem/recovery.sh; ROOT_DOMAIN="$DOMAIN"; recover_modem_reboot >/dev/null 2>&1;; esac; LAST_ACTION="$A"; }
+load_policy(){ "$LOCALAI" compile >/dev/null 2>&1 || return 1; DOMAIN="$(kv domain)"; A1="$(kv action1)"; A2="$(kv action2)"; A3="$(kv action3)"; V1="$(kv verify1)"; V2="$(kv verify2)"; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1; case "$V1:$V2" in *[!0-9:]*|'') return 1;; esac; return 0; }
+record(){ [ -x "$LOCALAI" ] && "$LOCALAI" record "$DOMAIN" "$1" "$2" "$3" >/dev/null 2>&1; }
+LAST_ACTION=NONE; DOMAIN=UNKNOWN; write_state STANDBY
 while :; do
  if probe; then write_state STANDBY; sleep "$SLEEP"; continue; fi
- write_state TRIGGERED
- # immediate second path distinguishes a transient packet loss without waiting for normal monitor cycle
- sleep 1
- if probe; then write_state STANDBY; continue; fi
+ START_MS="$(date +%s)000"; write_state TRIGGERED
+ # Reflex confirmation is outside the normal AI/telemetry cycle.
+ sleep 1; if probe; then write_state STANDBY; continue; fi
+ load_policy || { DOMAIN=FALLBACK; A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT; V1=2; V2=4; }
  write_state RECOVERING
- A="$(local_ai_action)"; exec_action "$A"
- # Reflex escalation: never wait for Gemini. Local policy only.
- sleep 3; probe && { write_state RECOVERED; sleep 1; continue; }
- [ "$A" != WAN_RECONNECT ] && exec_action WAN_RECONNECT
- sleep 3; probe && { write_state RECOVERED; sleep 1; continue; }
- case "$A" in CELLULAR|MODEM_REBOOT) :;; *)
-   DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"
-   case "$DOMAIN" in CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) exec_action MODEM_REBOOT;; *) exec_action NETIFD_RESTART;; esac;;
- esac
- # stay in recovery loop until connectivity returns; budgets inside modem recovery prevent reboot loops
- while ! probe; do sleep 2; done
- write_state RECOVERED; sleep 1
+ for STEP in 1 2 3; do
+  eval "A=\$A$STEP"; exec_action "$A" || continue
+  [ "$STEP" = 1 ] && WAIT="$V1" || WAIT="$V2"; sleep "$WAIT"
+  if probe; then END_MS="$(date +%s)000"; MS=$((END_MS-START_MS)); record "$A" SUCCESS "$MS"; write_state RECOVERED; sleep 1; break; fi
+  record "$A" FAILED 0
+  [ "$STEP" = 3 ] && { while ! probe; do sleep 2; done; END_MS="$(date +%s)000"; MS=$((END_MS-START_MS)); record "$A" LATE_SUCCESS "$MS"; write_state RECOVERED; sleep 1; }
+ done
 done
