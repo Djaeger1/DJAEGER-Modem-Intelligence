@@ -2,22 +2,24 @@
 . /usr/lib/djaeger-modem/common.sh
 [ -f /usr/lib/djaeger-modem/adaptive.sh ] && . /usr/lib/djaeger-modem/adaptive.sh
 [ -f /usr/lib/djaeger-modem/gemini.sh ] && . /usr/lib/djaeger-modem/gemini.sh
-VERSION='1.2-candidate'
+VERSION='1.2-rc1'
 REPO_RAW='https://raw.githubusercontent.com/Djaeger1/DJAEGER-Modem-Intelligence/main'
 cmd="$1"
 remote_version(){ wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n '; }
+statev(){ sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
 case "$cmd" in
  status|health|'')
-   [ -f "$STATE" ] || { echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; }; . "$STATE"
+   [ -f "$STATE" ] || { echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; }
+   state="$(statev state)"; score="$(statev score)"; cause="$(statev cause)"; confidence="$(statev confidence)"; modem="$(statev modem)"; service="$(statev service)"; sim="$(statev sim)"; wan_ip="$(statev wan_ip)"; rsrp="$(statev rsrp)"; rsrq="$(statev rsrq)"; rssi="$(statev rssi)"; sinr="$(statev sinr)"; pci="$(statev pci)"; cell_id="$(statev cell_id)"; gateway="$(statev gateway)"; internet="$(statev internet)"; dns="$(statev dns)"; self_heal="$(statev self_heal)"; adaptive_samples="$(statev adaptive_samples)"; adaptive_risk="$(statev adaptive_risk)"; adaptive_reason="$(statev adaptive_reason)"; last_action="$(statev last_action)"; recovery_count="$(statev recovery_count)"
    cat <<EOF
-DJAEGER MODEM INTELLIGENCE v1.2-candidate
-State       : $state
-Health      : $score/100
-Cause       : $cause
-Confidence  : $confidence%
+DJAEGER MODEM INTELLIGENCE v$VERSION
+State       : ${state:-UNKNOWN}
+Health      : ${score:-0}/100
+Cause       : ${cause:-UNKNOWN}
+Confidence  : ${confidence:-0}%
 Modem       : $([ "$modem" = 1 ] && echo ONLINE || echo OFFLINE)
-Service     : $service
-SIM         : $sim
+Service     : ${service:-NA}
+SIM         : ${sim:-NA}
 WAN IP      : ${wan_ip:-NONE}
 RSRP        : ${rsrp:-NA}
 RSRQ        : ${rsrq:-NA}
@@ -29,7 +31,7 @@ Gateway     : $([ "$gateway" = 1 ] && echo OK || echo FAIL)
 Internet    : $([ "$internet" = 1 ] && echo OK || echo FAIL)
 DNS         : $([ "$dns" = 1 ] && echo OK || echo FAIL)
 Self-Heal   : $([ "$self_heal" = 1 ] && echo ENABLED-L1 || echo LOCKED)
-Adaptive AI : $([ "${adaptive_samples:-0}" -ge 20 ] 2>/dev/null && echo ACTIVE || echo LEARNING)
+Adaptive AI : $([ "${adaptive_samples:-0}" -ge "$(uciopt baseline_min_samples 40)" ] 2>/dev/null && echo ACTIVE || echo LEARNING)
 AI Risk     : ${adaptive_risk:-0}/100
 AI Reason   : ${adaptive_reason:-LEARNING}
 Last Action : ${last_action:-NONE}
@@ -40,7 +42,7 @@ EOF
  gemini)
    case "$2" in
      status|'') gemini_status ;;
-     set-key) echo 'Paste Gemini API key, then press Enter:'; IFS= read -r K; [ -n "$K" ] || { echo 'Empty key rejected'; exit 1; }; printf '%s' "$K" | gemini_set_key; unset K; uci set djaeger_modem.main.gemini_enabled='1'; uci commit djaeger_modem; echo 'Gemini key stored securely; advisor enabled.' ;;
+     set-key) printf 'Gemini API key: '; stty -echo 2>/dev/null || true; IFS= read -r K; stty echo 2>/dev/null || true; echo; [ -n "$K" ] || { echo 'Empty key rejected'; exit 1; }; printf '%s' "$K" | gemini_set_key; unset K; uci set djaeger_modem.main.gemini_enabled='1'; uci commit djaeger_modem; echo 'Gemini key stored securely; advisor enabled.' ;;
      clear-key) gemini_clear_key; uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini key removed; advisor disabled.' ;;
      enable) [ -s "$GEMINI_KEY" ] || { echo 'Set API key first'; exit 1; }; uci set djaeger_modem.main.gemini_enabled='1'; uci commit djaeger_modem; echo 'Gemini advisor enabled.' ;;
      disable) uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini advisor disabled; Local AI remains active.' ;;
@@ -50,9 +52,9 @@ EOF
  telemetry) tail -n 20 "$RING" 2>/dev/null || echo 'No telemetry yet' ;;
  logs) tail -n 50 "$LOG" 2>/dev/null || echo 'No logs yet' ;;
  version) echo "DJAEGER Modem Intelligence v$VERSION" ;;
- check-update) REMOTE="$(remote_version)"; [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }; echo "Installed: $VERSION"; echo "Available: $REMOTE" ;;
- update) echo 'Candidate build cannot self-update from main.'; exit 1 ;;
- rollback) echo 'Use candidate installer rollback snapshot if required.' ;;
+ check-update) REMOTE="$(remote_version)"; [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }; echo "Installed: $VERSION"; echo "Stable available: $REMOTE" ;;
+ update) echo 'RC build cannot self-update from stable main.'; exit 1 ;;
+ rollback) echo 'Use installer rollback snapshot if required.' ;;
  start|stop|restart) /etc/init.d/djaeger-modem "$cmd" ;;
  *) echo 'Usage: djaeger-modem {status|intelligence|gemini|incidents|telemetry|logs|version|start|stop|restart}'; exit 2 ;;
 esac
