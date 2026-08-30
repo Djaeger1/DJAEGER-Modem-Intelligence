@@ -1,8 +1,9 @@
 #!/bin/sh
 . /usr/lib/djaeger-modem/common.sh
 LOCK=/tmp/djaeger-modem.lock
-if ! mkdir "$LOCK" 2>/dev/null; then exit 0; fi
-trap 'rm -rf "$LOCK"' EXIT INT TERM
+if ! mkdir "$LOCK" 2>/dev/null; then exit 73; fi
+cleanup(){ rm -rf "$LOCK"; }
+trap cleanup EXIT INT TERM HUP
 MODEM_URL="$(uciopt modem_url http://192.168.8.1)"; GW="$(uciopt gateway 192.168.8.1)"; INTERVAL="$(uciopt interval 15)"; FAIL_NEED="$(uciopt confirm_failures 3)"; REC_NEED="$(uciopt recover_confirmations 2)"
 FAILS=0; GOODS=0; CUR=STARTING; INCIDENT_START=0; INCIDENT_CAUSE=NONE; INCIDENT_CONF=0; LAST_RECOVERY=0; RECOVERY_COUNT=0; RECOVERY_WINDOW=0; LAST_ACTION=NONE
 [ -f "$RING" ] || echo 'epoch,state,modem,service,sim,conn,wanip,rsrp,rsrq,rssi,sinr,pci,cell,gw,internet,dns,score,cause,confidence' > "$RING"
@@ -11,32 +12,8 @@ fetch(){ wget -qO- --timeout=4 --header="Cookie: $SESSION" --header="__RequestVe
 session(){ X="$(wget -qO- --timeout=4 "$MODEM_URL/api/webserver/SesTokInfo" 2>/dev/null)"; SESSION="$(xmlv "$X" SesInfo)"; TOKEN="$(xmlv "$X" TokInfo)"; [ -n "$SESSION" ] && [ -n "$TOKEN" ]; }
 probe(){ ping -c 1 -W 2 "$1" >/dev/null 2>&1; }
 dnsprobe(){ nslookup example.com 127.0.0.1 >/dev/null 2>&1 || nslookup example.com >/dev/null 2>&1; }
-classify(){
- CAUSE=NONE; CONF=50; SCORE=100
- if [ "$MODEM_OK" = 0 ]; then CAUSE=MODEM_UNREACHABLE; CONF=96; SCORE=10
- elif [ "$SIM" != 1 ] && [ -n "$SIM" ]; then CAUSE=SIM_OR_MODEM_SERVICE; CONF=95; SCORE=20
- elif [ "$SERVICE" != 2 ] && [ -n "$SERVICE" ]; then CAUSE=CELLULAR_SERVICE_LOST; CONF=93; SCORE=25
- elif [ -z "$WANIP" ]; then CAUSE=DATA_SESSION_LOST; CONF=91; SCORE=35
- elif [ "$GWOK" = 0 ]; then CAUSE=MODEM_PATH_FAILURE; CONF=90; SCORE=30
- elif [ "$INET" = 0 ]; then CAUSE=UPSTREAM_OR_DATA_SESSION; CONF=88; SCORE=45
- elif [ "$DNSOK" = 0 ]; then CAUSE=DNS_FAILURE; CONF=94; SCORE=60
- else
-   S="$(num "$SINR")"; Q="$(num "$RSRQ")"; P="$(num "$RSRP")"
-   [ -n "$S" ] && [ "$S" -lt 0 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=82; SCORE=55; }
-   [ -n "$Q" ] && [ "$Q" -lt -17 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=86; SCORE=50; }
-   [ -n "$P" ] && [ "$P" -lt -110 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=88; SCORE=45; }
- fi
-}
-recover_l1(){
- [ "$(uciopt self_heal 0)" = 1 ] || return 1; [ "$(uciopt allow_wan_reconnect 0)" = 1 ] || return 1
- CD="$(uciopt recovery_cooldown 300)"; MAX="$(uciopt max_recoveries_hour 2)"; N="$(date +%s)"
- [ $((N-LAST_RECOVERY)) -ge "$CD" ] 2>/dev/null || return 1
- if [ "$RECOVERY_WINDOW" -eq 0 ] || [ $((N-RECOVERY_WINDOW)) -ge 3600 ]; then RECOVERY_WINDOW=$N; RECOVERY_COUNT=0; fi
- [ "$RECOVERY_COUNT" -lt "$MAX" ] 2>/dev/null || { log 'RECOVERY_BLOCKED budget_exhausted'; return 1; }
- log "RECOVERY_L1 begin action=ifup_wan cause=$CAUSE"
- if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; LAST_RECOVERY=$N; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); CUR=RECOVERING; return 0; fi
- log 'RECOVERY_L1 failed action=ifup_wan'; LAST_ACTION=WAN_RECONNECT_FAILED; LAST_RECOVERY=$N; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); return 1
-}
+classify(){ CAUSE=NONE; CONF=50; SCORE=100; if [ "$MODEM_OK" = 0 ]; then CAUSE=MODEM_UNREACHABLE; CONF=96; SCORE=10; elif [ "$SIM" != 1 ] && [ -n "$SIM" ]; then CAUSE=SIM_OR_MODEM_SERVICE; CONF=95; SCORE=20; elif [ "$SERVICE" != 2 ] && [ -n "$SERVICE" ]; then CAUSE=CELLULAR_SERVICE_LOST; CONF=93; SCORE=25; elif [ -z "$WANIP" ]; then CAUSE=DATA_SESSION_LOST; CONF=91; SCORE=35; elif [ "$GWOK" = 0 ]; then CAUSE=MODEM_PATH_FAILURE; CONF=90; SCORE=30; elif [ "$INET" = 0 ]; then CAUSE=UPSTREAM_OR_DATA_SESSION; CONF=88; SCORE=45; elif [ "$DNSOK" = 0 ]; then CAUSE=DNS_FAILURE; CONF=94; SCORE=60; else S="$(num "$SINR")"; Q="$(num "$RSRQ")"; P="$(num "$RSRP")"; [ -n "$S" ] && [ "$S" -lt 0 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=82; SCORE=55; }; [ -n "$Q" ] && [ "$Q" -lt -17 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=86; SCORE=50; }; [ -n "$P" ] && [ "$P" -lt -110 ] 2>/dev/null && { CAUSE=RADIO_DEGRADED; CONF=88; SCORE=45; }; fi; }
+recover_l1(){ [ "$(uciopt self_heal 0)" = 1 ] || return 1; [ "$(uciopt allow_wan_reconnect 0)" = 1 ] || return 1; CD="$(uciopt recovery_cooldown 300)"; MAX="$(uciopt max_recoveries_hour 2)"; N="$(date +%s)"; [ $((N-LAST_RECOVERY)) -ge "$CD" ] 2>/dev/null || return 1; if [ "$RECOVERY_WINDOW" -eq 0 ] || [ $((N-RECOVERY_WINDOW)) -ge 3600 ]; then RECOVERY_WINDOW=$N; RECOVERY_COUNT=0; fi; [ "$RECOVERY_COUNT" -lt "$MAX" ] 2>/dev/null || { log 'RECOVERY_BLOCKED budget_exhausted'; return 1; }; log "RECOVERY_L1 begin action=ifup_wan cause=$CAUSE"; if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; LAST_RECOVERY=$N; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); CUR=RECOVERING; return 0; fi; log 'RECOVERY_L1 failed action=ifup_wan'; LAST_ACTION=WAN_RECONNECT_FAILED; LAST_RECOVERY=$N; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); return 1; }
 write_state(){ cat > "$STATE.tmp" <<EOF
 updated=$(date +%s)
 state=$CUR
@@ -61,26 +38,5 @@ self_heal=$(uciopt self_heal 0)
 last_action=$LAST_ACTION
 recovery_count=$RECOVERY_COUNT
 EOF
- mv "$STATE.tmp" "$STATE"; }
-while :; do
- NOW=$(date +%s); MODEM_OK=0; SIG=''; STAT=''
- if session; then SIG="$(fetch device/signal)"; STAT="$(fetch monitoring/status)"; echo "$SIG$STAT" | grep -q '<response>' && MODEM_OK=1; fi
- SERVICE="$(xmlv "$STAT" ServiceStatus)"; SIM="$(xmlv "$STAT" SimStatus)"; CONN="$(xmlv "$STAT" ConnectionStatus)"; WANIP="$(xmlv "$STAT" WanIPAddress)"
- RSRP="$(xmlv "$SIG" rsrp)"; RSRQ="$(xmlv "$SIG" rsrq)"; RSSI="$(xmlv "$SIG" rssi)"; SINR="$(xmlv "$SIG" sinr)"; PCI="$(xmlv "$SIG" pci)"; CELL="$(xmlv "$SIG" cell_id)"
- probe "$GW" && GWOK=1 || GWOK=0; probe 1.1.1.1 && INET=1 || { probe 8.8.8.8 && INET=1 || INET=0; }; dnsprobe && DNSOK=1 || DNSOK=0; classify
- BAD=0; [ "$MODEM_OK" = 0 ] && BAD=1; [ "$GWOK" = 0 ] && BAD=1; [ "$INET" = 0 ] && BAD=1
- if [ "$BAD" = 1 ]; then
-   FAILS=$((FAILS+1)); GOODS=0
-   if [ "$FAILS" -ge "$FAIL_NEED" ]; then
-     if [ "$CUR" != OUTAGE ] && [ "$CUR" != RECOVERING ]; then CUR=OUTAGE; INCIDENT_START=$NOW; INCIDENT_CAUSE=$CAUSE; INCIDENT_CONF=$CONF; log "OUTAGE cause=$CAUSE confidence=$CONF score=$SCORE"; recover_l1 || true; fi
-   else CUR=SUSPECT; fi
- else
-   FAILS=0; GOODS=$((GOODS+1))
-   if [ "$CUR" = OUTAGE ] || [ "$CUR" = RECOVERING ]; then
-     if [ "$GOODS" -ge "$REC_NEED" ]; then DUR=$((NOW-INCIDENT_START)); [ "$INCIDENT_START" -gt 0 ] || DUR=0; echo "$INCIDENT_START,$NOW,$DUR,$INCIDENT_CAUSE,$INCIDENT_CONF,AUTO" >> "$INCIDENTS"; log "RECOVERED duration=${DUR}s cause=$INCIDENT_CAUSE"; CUR=HEALTHY; INCIDENT_START=0; INCIDENT_CAUSE=NONE; INCIDENT_CONF=0; fi
-   else [ "$CAUSE" = NONE ] && CUR=HEALTHY || CUR=DEGRADED; fi
- fi
- printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$NOW" "$CUR" "$MODEM_OK" "$SERVICE" "$SIM" "$CONN" "$WANIP" "$RSRP" "$RSRQ" "$RSSI" "$SINR" "$PCI" "$CELL" "$GWOK" "$INET" "$DNSOK" "$SCORE" "$CAUSE" "$CONF" >> "$RING"
- L=$(wc -l < "$RING" 2>/dev/null); [ "$L" -gt 2401 ] && { head -n1 "$RING" > "$RING.new"; tail -n 2400 "$RING" >> "$RING.new"; mv "$RING.new" "$RING"; }
- write_state; sleep "$INTERVAL"
-done
+mv "$STATE.tmp" "$STATE"; }
+while :; do NOW=$(date +%s); MODEM_OK=0; SIG=''; STAT=''; if session; then SIG="$(fetch device/signal)"; STAT="$(fetch monitoring/status)"; echo "$SIG$STAT" | grep -q '<response>' && MODEM_OK=1; fi; SERVICE="$(xmlv "$STAT" ServiceStatus)"; SIM="$(xmlv "$STAT" SimStatus)"; CONN="$(xmlv "$STAT" ConnectionStatus)"; WANIP="$(xmlv "$STAT" WanIPAddress)"; RSRP="$(xmlv "$SIG" rsrp)"; RSRQ="$(xmlv "$SIG" rsrq)"; RSSI="$(xmlv "$SIG" rssi)"; SINR="$(xmlv "$SIG" sinr)"; PCI="$(xmlv "$SIG" pci)"; CELL="$(xmlv "$SIG" cell_id)"; probe "$GW" && GWOK=1 || GWOK=0; probe 1.1.1.1 && INET=1 || { probe 8.8.8.8 && INET=1 || INET=0; }; dnsprobe && DNSOK=1 || DNSOK=0; classify; BAD=0; [ "$MODEM_OK" = 0 ] && BAD=1; [ "$GWOK" = 0 ] && BAD=1; [ "$INET" = 0 ] && BAD=1; if [ "$BAD" = 1 ]; then FAILS=$((FAILS+1)); GOODS=0; if [ "$FAILS" -ge "$FAIL_NEED" ]; then if [ "$CUR" != OUTAGE ] && [ "$CUR" != RECOVERING ]; then CUR=OUTAGE; INCIDENT_START=$NOW; INCIDENT_CAUSE=$CAUSE; INCIDENT_CONF=$CONF; log "OUTAGE cause=$CAUSE confidence=$CONF score=$SCORE"; recover_l1 || true; fi; else CUR=SUSPECT; fi; else FAILS=0; GOODS=$((GOODS+1)); if [ "$CUR" = OUTAGE ] || [ "$CUR" = RECOVERING ]; then if [ "$GOODS" -ge "$REC_NEED" ]; then DUR=$((NOW-INCIDENT_START)); [ "$INCIDENT_START" -gt 0 ] || DUR=0; echo "$INCIDENT_START,$NOW,$DUR,$INCIDENT_CAUSE,$INCIDENT_CONF,AUTO" >> "$INCIDENTS"; log "RECOVERED duration=${DUR}s cause=$INCIDENT_CAUSE"; CUR=HEALTHY; INCIDENT_START=0; INCIDENT_CAUSE=NONE; INCIDENT_CONF=0; fi; else [ "$CAUSE" = NONE ] && CUR=HEALTHY || CUR=DEGRADED; fi; fi; printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$NOW" "$CUR" "$MODEM_OK" "$SERVICE" "$SIM" "$CONN" "$WANIP" "$RSRP" "$RSRQ" "$RSSI" "$SINR" "$PCI" "$CELL" "$GWOK" "$INET" "$DNSOK" "$SCORE" "$CAUSE" "$CONF" >> "$RING"; L=$(wc -l < "$RING" 2>/dev/null); [ "$L" -gt 2401 ] && { head -n1 "$RING" > "$RING.new"; tail -n 2400 "$RING" >> "$RING.new"; mv "$RING.new" "$RING"; }; write_state; sleep "$INTERVAL"; done
