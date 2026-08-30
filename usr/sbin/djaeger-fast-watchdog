@@ -1,0 +1,30 @@
+#!/bin/sh
+# DJAEGER Fast Watchdog: standby-only connectivity reflex.
+STATE=/tmp/djaeger-fast-watchdog.state
+AI=/tmp/djaeger-modem/state
+SLEEP=${DJAEGER_WATCHDOG_INTERVAL:-1}
+probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
+write_state(){ printf 'state=%s\nupdated=%s\nlast_action=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" > "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+local_ai_action(){ DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"; case "$DOMAIN" in OPENWRT_DNS|DNS_UPSTREAM) echo DNSMASQ_RESTART;; OPENWRT_SYSTEM) echo NETIFD_RESTART;; CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) echo MODEM_REBOOT;; *) echo WAN_RECONNECT;; esac; }
+exec_action(){ A="$1"; case "$A" in WAN_RECONNECT) ifup wan >/dev/null 2>&1;; DNSMASQ_RESTART) /etc/init.d/dnsmasq restart >/dev/null 2>&1;; NETIFD_RESTART) /etc/init.d/network restart >/dev/null 2>&1;; MODEM_REBOOT) . /usr/lib/djaeger-modem/common.sh; . /usr/lib/djaeger-modem/recovery.sh; ROOT_DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"; recover_modem_reboot >/dev/null 2>&1;; esac; LAST_ACTION="$A"; }
+LAST_ACTION=NONE; write_state STANDBY
+while :; do
+ if probe; then write_state STANDBY; sleep "$SLEEP"; continue; fi
+ write_state TRIGGERED
+ # immediate second path distinguishes a transient packet loss without waiting for normal monitor cycle
+ sleep 1
+ if probe; then write_state STANDBY; continue; fi
+ write_state RECOVERING
+ A="$(local_ai_action)"; exec_action "$A"
+ # Reflex escalation: never wait for Gemini. Local policy only.
+ sleep 3; probe && { write_state RECOVERED; sleep 1; continue; }
+ [ "$A" != WAN_RECONNECT ] && exec_action WAN_RECONNECT
+ sleep 3; probe && { write_state RECOVERED; sleep 1; continue; }
+ case "$A" in CELLULAR|MODEM_REBOOT) :;; *)
+   DOMAIN="$(sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1)"
+   case "$DOMAIN" in CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) exec_action MODEM_REBOOT;; *) exec_action NETIFD_RESTART;; esac;;
+ esac
+ # stay in recovery loop until connectivity returns; budgets inside modem recovery prevent reboot loops
+ while ! probe; do sleep 2; done
+ write_state RECOVERED; sleep 1
+done
