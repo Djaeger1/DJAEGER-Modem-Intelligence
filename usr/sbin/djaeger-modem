@@ -3,6 +3,7 @@
 VERSION='1.1'
 REPO_RAW='https://raw.githubusercontent.com/Djaeger1/DJAEGER-Modem-Intelligence/main'
 cmd="$1"
+remote_version(){ wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n '; }
 case "$cmd" in
  status|health|'')
    if [ ! -f "$STATE" ]; then echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; fi
@@ -36,14 +37,15 @@ EOF
  logs) tail -n 50 "$LOG" 2>/dev/null || echo 'No logs yet' ;;
  version) echo "DJAEGER Modem Intelligence v$VERSION" ;;
  check-update)
-   REMOTE="$(wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n ')"
-   [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }
+   REMOTE="$(remote_version)"; [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }
    echo "Installed: $VERSION"; echo "Available: $REMOTE"
    [ "$REMOTE" = "$VERSION" ] && echo 'Status: up to date' || echo 'Status: update available'
    ;;
  update)
+   REMOTE="$(remote_version)"; [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }
+   if [ "$REMOTE" = "$VERSION" ]; then echo "Already up to date: v$VERSION"; exit 0; fi
    TMP=/tmp/djaeger-modem-update.sh
-   echo 'Downloading DJAEGER installer...'
+   echo "Updating v$VERSION -> v$REMOTE..."
    wget -qO "$TMP" --timeout=15 "$REPO_RAW/install.sh" || { echo 'Update download failed'; rm -f "$TMP"; exit 1; }
    grep -q '^DJAEGER_INSTALLER_ID=DJAEGER_MODEM_INTELLIGENCE$' "$TMP" || { echo 'Installer identity check failed'; rm -f "$TMP"; exit 1; }
    chmod 700 "$TMP" && sh "$TMP" --update
@@ -52,6 +54,7 @@ EOF
  rollback)
    [ -d /root/djaeger-modem/rollback ] || { echo 'No rollback snapshot available'; exit 1; }
    /etc/init.d/djaeger-modem stop >/dev/null 2>&1 || true
+   sleep 2
    for F in usr/sbin/djaeger-modem usr/sbin/djaeger-modemd usr/lib/djaeger-modem/common.sh etc/init.d/djaeger-modem etc/config/djaeger_modem; do
      [ -f "/root/djaeger-modem/rollback/$F" ] && { mkdir -p "/$(dirname "$F")"; cp -f "/root/djaeger-modem/rollback/$F" "/$F"; }
    done
