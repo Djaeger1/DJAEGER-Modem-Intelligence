@@ -1,31 +1,32 @@
 #!/bin/sh
-# DJAEGER Fast Watchdog v2: standby sensor + Local AI policy executor.
+# DJAEGER Fast Watchdog v3: standby sensor + Local AI policy + Root Broker executor.
 STATE=/tmp/djaeger-fast-watchdog.state
 POLICY=/tmp/djaeger-local-ai.policy
-AI=/tmp/djaeger-modem/state
 LOCALAI=/usr/lib/djaeger-modem/local-ai-policy.sh
 SLEEP=${DJAEGER_WATCHDOG_INTERVAL:-1}
 umask 077
+. /usr/lib/djaeger-modem/common.sh
+. /usr/lib/djaeger-modem/recovery.sh
+. /usr/lib/djaeger-modem/root-broker.sh
 probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
 kv(){ sed -n "s/^$1=//p" "$POLICY" 2>/dev/null | head -n1; }
 valid_action(){ case "$1" in WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;; *) return 1;; esac; }
-write_state(){ printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=LOCAL_AI\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" > "$STATE.tmp"; chmod 600 "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
-exec_action(){ A="$1"; valid_action "$A" || return 1; case "$A" in WAN_RECONNECT) ifup wan >/dev/null 2>&1;; DNSMASQ_RESTART) /etc/init.d/dnsmasq restart >/dev/null 2>&1;; NETIFD_RESTART) /etc/init.d/network restart >/dev/null 2>&1;; MODEM_REBOOT) . /usr/lib/djaeger-modem/common.sh; . /usr/lib/djaeger-modem/recovery.sh; ROOT_DOMAIN="$DOMAIN"; recover_modem_reboot >/dev/null 2>&1;; esac; LAST_ACTION="$A"; }
-load_policy(){ "$LOCALAI" compile >/dev/null 2>&1 || return 1; DOMAIN="$(kv domain)"; A1="$(kv action1)"; A2="$(kv action2)"; A3="$(kv action3)"; V1="$(kv verify1)"; V2="$(kv verify2)"; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1; case "$V1:$V2" in *[!0-9:]*|'') return 1;; esac; return 0; }
+write_state(){ T="$STATE.$$"; printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=LOCAL_AI\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" > "$T"; chmod 600 "$T"; mv "$T" "$STATE"; }
+load_policy(){ "$LOCALAI" compile >/dev/null 2>&1 || return 1; DOMAIN="$(kv domain)"; A1="$(kv action1)"; A2="$(kv action2)"; A3="$(kv action3)"; V1="$(kv verify1)"; V2="$(kv verify2)"; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1; case "$V1:$V2" in *[!0-9:]*|'') return 1;; esac; }
 record(){ [ -x "$LOCALAI" ] && "$LOCALAI" record "$DOMAIN" "$1" "$2" "$3" >/dev/null 2>&1; }
+run_step(){ A="$1"; WAIT="$2"; valid_action "$A" || return 1; ROOT_DOMAIN="$DOMAIN"; CUR=RECOVERING; if broker_execute WATCHDOG "$A"; then LAST_ACTION="$A"; sleep "$WAIT"; if probe; then broker_verify_result WATCHDOG "$A" >/dev/null 2>&1 || true; return 0; fi; broker_log WATCHDOG "$A" FAILED FAST_VERIFY; fi; return 1; }
 LAST_ACTION=NONE; DOMAIN=UNKNOWN; write_state STANDBY
 while :; do
  if probe; then write_state STANDBY; sleep "$SLEEP"; continue; fi
- START_MS="$(date +%s)000"; write_state TRIGGERED
- # Reflex confirmation is outside the normal AI/telemetry cycle.
+ START="$(date +%s)"; write_state TRIGGERED
  sleep 1; if probe; then write_state STANDBY; continue; fi
- load_policy || { DOMAIN=FALLBACK; A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT; V1=2; V2=4; }
+ load_policy || { DOMAIN=MODEM_DATA_SESSION; A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT; V1=2; V2=4; }
  write_state RECOVERING
+ SUCCESS=0
  for STEP in 1 2 3; do
-  eval "A=\$A$STEP"; exec_action "$A" || continue
-  [ "$STEP" = 1 ] && WAIT="$V1" || WAIT="$V2"; sleep "$WAIT"
-  if probe; then END_MS="$(date +%s)000"; MS=$((END_MS-START_MS)); record "$A" SUCCESS "$MS"; write_state RECOVERED; sleep 1; break; fi
-  record "$A" FAILED 0
-  [ "$STEP" = 3 ] && { while ! probe; do sleep 2; done; END_MS="$(date +%s)000"; MS=$((END_MS-START_MS)); record "$A" LATE_SUCCESS "$MS"; write_state RECOVERED; sleep 1; }
+  case "$STEP" in 1) A="$A1"; W="$V1";; 2) A="$A2"; W="$V2";; 3) A="$A3"; W="$V2";; esac
+  if run_step "$A" "$W"; then MS=$((($(date +%s)-START)*1000)); record "$A" SUCCESS "$MS"; SUCCESS=1; break; else record "$A" FAILED 0; fi
  done
+ if [ "$SUCCESS" = 0 ]; then while ! probe; do sleep 2; done; MS=$((($(date +%s)-START)*1000)); record "$LAST_ACTION" LATE_SUCCESS "$MS"; fi
+ write_state RECOVERED; sleep 1
 done
