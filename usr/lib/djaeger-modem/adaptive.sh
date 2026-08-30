@@ -1,75 +1,49 @@
 #!/bin/sh
-# DJAEGER v1.2 Adaptive Intelligence - observer-only engine.
-# No recovery action is permitted from this component.
+# DJAEGER v1.2 Adaptive Intelligence - observer only; never invokes recovery.
 ADAPT_DIR=/root/djaeger-modem/adaptive
 ADAPT_STATE=$ADAPT_DIR/baseline.state
 ADAPT_EVENTS=$ADAPT_DIR/anomalies.csv
 mkdir -p "$ADAPT_DIR"
-
-ai_num(){ echo "$1" | sed 's/[^0-9.-]//g'; }
-ai_abs(){ [ "$1" -lt 0 ] 2>/dev/null && echo $((0-$1)) || echo "$1"; }
-
+ai_num(){ printf '%s' "$1" | sed 's/[^0-9.-]//g'; }
+ai_get(){ sed -n "s/^$1=//p" "$ADAPT_STATE" 2>/dev/null | head -n1; }
+ai_int(){ case "$1" in ''|*[!0-9-]*) echo "$2";; *) echo "$1";; esac; }
 adaptive_init(){
  [ -f "$ADAPT_EVENTS" ] || echo 'epoch,risk,reason,rsrp_delta,rsrq_delta,sinr_delta,cell_change' > "$ADAPT_EVENTS"
- AI_N=0; AI_RSRP_SUM=0; AI_RSRQ_SUM=0; AI_SINR_SUM=0; AI_BASE_RSRP=0; AI_BASE_RSRQ=0; AI_BASE_SINR=0; AI_LAST_CELL=''; AI_RISK=0; AI_REASON=LEARNING
- if [ -f "$ADAPT_STATE" ]; then . "$ADAPT_STATE" 2>/dev/null || true; fi
+ AI_N="$(ai_int "$(ai_get AI_N)" 0)"; AI_BASE_RSRP="$(ai_int "$(ai_get AI_BASE_RSRP)" 0)"; AI_BASE_RSRQ="$(ai_int "$(ai_get AI_BASE_RSRQ)" 0)"; AI_BASE_SINR="$(ai_int "$(ai_get AI_BASE_SINR)" 0)"; AI_LAST_CELL="$(ai_int "$(ai_get AI_LAST_CELL)" 0)"; AI_RISK="$(ai_int "$(ai_get AI_RISK)" 0)"; AI_STREAK="$(ai_int "$(ai_get AI_STREAK)" 0)"; AI_REASON="$(ai_get AI_REASON)"; [ -n "$AI_REASON" ] || AI_REASON=LEARNING
 }
-
 adaptive_save(){
  cat > "$ADAPT_STATE.tmp" <<EOF
 AI_N=$AI_N
-AI_RSRP_SUM=$AI_RSRP_SUM
-AI_RSRQ_SUM=$AI_RSRQ_SUM
-AI_SINR_SUM=$AI_SINR_SUM
 AI_BASE_RSRP=$AI_BASE_RSRP
 AI_BASE_RSRQ=$AI_BASE_RSRQ
 AI_BASE_SINR=$AI_BASE_SINR
 AI_LAST_CELL=$AI_LAST_CELL
 AI_RISK=$AI_RISK
+AI_STREAK=$AI_STREAK
 AI_REASON=$AI_REASON
 EOF
- mv "$ADAPT_STATE.tmp" "$ADAPT_STATE"
+ chmod 600 "$ADAPT_STATE.tmp"; mv "$ADAPT_STATE.tmp" "$ADAPT_STATE"
 }
-
 adaptive_observe(){
- # Learn only from samples already proven healthy by deterministic core.
- [ "$CUR" = HEALTHY ] || return 0
  AR="$(ai_num "$RSRP")"; AQ="$(ai_num "$RSRQ")"; AS="$(ai_num "$SINR")"
  [ -n "$AR" ] && [ -n "$AQ" ] && [ -n "$AS" ] || return 0
- # Huawei values are integral on the validated target modem. Ignore malformed values.
  case "$AR:$AQ:$AS" in *.*) return 0;; esac
- AI_N=$((AI_N+1)); AI_RSRP_SUM=$((AI_RSRP_SUM+AR)); AI_RSRQ_SUM=$((AI_RSRQ_SUM+AQ)); AI_SINR_SUM=$((AI_SINR_SUM+AS))
- # Bound learning memory to 240 healthy samples; then use a conservative EWMA-like update.
- if [ "$AI_N" -le 240 ]; then
-   AI_BASE_RSRP=$((AI_RSRP_SUM/AI_N)); AI_BASE_RSRQ=$((AI_RSRQ_SUM/AI_N)); AI_BASE_SINR=$((AI_SINR_SUM/AI_N))
- else
-   AI_N=240; AI_RSRP_SUM=$((AI_BASE_RSRP*240)); AI_RSRQ_SUM=$((AI_BASE_RSRQ*240)); AI_SINR_SUM=$((AI_BASE_SINR*240))
-   AI_BASE_RSRP=$(((AI_BASE_RSRP*15+AR)/16)); AI_BASE_RSRQ=$(((AI_BASE_RSRQ*15+AQ)/16)); AI_BASE_SINR=$(((AI_BASE_SINR*15+AS)/16))
+ MIN="$(ai_int "$(uciopt baseline_min_samples 40)" 40)"; TH="$(ai_int "$(uciopt anomaly_threshold 60)" 60)"; NEED="$(ai_int "$(uciopt predictive_confirmations 3)" 3)"
+ CELL_CHANGE=0; [ "$AI_LAST_CELL" != 0 ] && [ -n "$CELL" ] && [ "$CELL" != "$AI_LAST_CELL" ] && CELL_CHANGE=1
+ [ -n "$CELL" ] && case "$CELL" in *[!0-9]*) :;; *) AI_LAST_CELL="$CELL";; esac
+ AI_RISK=0; AI_REASON=LEARNING
+ if [ "$AI_N" -ge "$MIN" ]; then
+   DR=$((AR-AI_BASE_RSRP)); DQ=$((AQ-AI_BASE_RSRQ)); DS=$((AS-AI_BASE_SINR)); AI_REASON=NORMAL
+   [ "$DR" -le -12 ] && AI_RISK=$((AI_RISK+30)); [ "$DQ" -le -5 ] && AI_RISK=$((AI_RISK+25)); [ "$DS" -le -8 ] && AI_RISK=$((AI_RISK+30)); [ "$CELL_CHANGE" = 1 ] && AI_RISK=$((AI_RISK+15))
+   if [ "$AI_RISK" -ge "$TH" ]; then AI_STREAK=$((AI_STREAK+1)); [ "$AI_STREAK" -ge "$NEED" ] && AI_REASON=RADIO_ANOMALY_CONFIRMED || AI_REASON=RADIO_ANOMALY_PENDING; else AI_STREAK=0; fi
+ else DR=0; DQ=0; DS=0; AI_STREAK=0; fi
+ # Learn only healthy, non-anomalous samples and only after scoring against the previous baseline.
+ if [ "$CUR" = HEALTHY ] && [ "$AI_RISK" -lt "$TH" ]; then
+   if [ "$AI_N" -eq 0 ]; then AI_BASE_RSRP=$AR; AI_BASE_RSRQ=$AQ; AI_BASE_SINR=$AS; AI_N=1
+   elif [ "$AI_N" -lt 240 ]; then N2=$((AI_N+1)); AI_BASE_RSRP=$(((AI_BASE_RSRP*AI_N+AR)/N2)); AI_BASE_RSRQ=$(((AI_BASE_RSRQ*AI_N+AQ)/N2)); AI_BASE_SINR=$(((AI_BASE_SINR*AI_N+AS)/N2)); AI_N=$N2
+   else AI_BASE_RSRP=$(((AI_BASE_RSRP*15+AR)/16)); AI_BASE_RSRQ=$(((AI_BASE_RSRQ*15+AQ)/16)); AI_BASE_SINR=$(((AI_BASE_SINR*15+AS)/16)); fi
  fi
- AI_RISK=0; AI_REASON=NORMAL
- DR=$((AR-AI_BASE_RSRP)); DQ=$((AQ-AI_BASE_RSRQ)); DS=$((AS-AI_BASE_SINR)); CELL_CHANGE=0
- [ -n "$AI_LAST_CELL" ] && [ -n "$CELL" ] && [ "$CELL" != "$AI_LAST_CELL" ] && CELL_CHANGE=1
- [ -n "$CELL" ] && AI_LAST_CELL="$CELL"
- # Do not declare predictive risk until a minimum baseline exists (~5 minutes at 15s interval).
- if [ "$AI_N" -ge 20 ]; then
-   [ "$DR" -le -12 ] && AI_RISK=$((AI_RISK+30))
-   [ "$DQ" -le -5 ] && AI_RISK=$((AI_RISK+25))
-   [ "$DS" -le -8 ] && AI_RISK=$((AI_RISK+30))
-   [ "$CELL_CHANGE" = 1 ] && AI_RISK=$((AI_RISK+15))
-   [ "$AI_RISK" -ge 50 ] && AI_REASON=RADIO_ANOMALY
- fi
- if [ "$AI_RISK" -ge 50 ]; then
-   echo "$(date +%s),$AI_RISK,$AI_REASON,$DR,$DQ,$DS,$CELL_CHANGE" >> "$ADAPT_EVENTS"
-   # Observer only: expose risk, never mutate CUR and never invoke recovery.
- fi
+ if [ "$AI_REASON" = RADIO_ANOMALY_CONFIRMED ]; then echo "$(date +%s),$AI_RISK,$AI_REASON,$DR,$DQ,$DS,$CELL_CHANGE" >> "$ADAPT_EVENTS"; L=$(wc -l < "$ADAPT_EVENTS" 2>/dev/null); [ "$L" -gt 1001 ] && { head -n1 "$ADAPT_EVENTS" > "$ADAPT_EVENTS.new"; tail -n 1000 "$ADAPT_EVENTS" >> "$ADAPT_EVENTS.new"; mv "$ADAPT_EVENTS.new" "$ADAPT_EVENTS"; }; fi
  adaptive_save
 }
-
-adaptive_status(){
- adaptive_init
- echo "Adaptive AI : $([ "$AI_N" -ge 20 ] && echo ACTIVE || echo LEARNING)"
- echo "Samples     : $AI_N/20 minimum"
- echo "Baseline    : RSRP ${AI_BASE_RSRP}dBm | RSRQ ${AI_BASE_RSRQ}dB | SINR ${AI_BASE_SINR}dB"
- echo "Risk        : ${AI_RISK}/100"
- echo "Assessment  : ${AI_REASON}"
-}
+adaptive_status(){ adaptive_init; MIN="$(ai_int "$(uciopt baseline_min_samples 40)" 40)"; echo "Adaptive AI : $([ "$AI_N" -ge "$MIN" ] && echo ACTIVE || echo LEARNING)"; echo "Samples     : $AI_N/$MIN minimum"; echo "Baseline    : RSRP ${AI_BASE_RSRP}dBm | RSRQ ${AI_BASE_RSRQ}dB | SINR ${AI_BASE_SINR}dB"; echo "Risk        : ${AI_RISK}/100"; echo "Streak      : ${AI_STREAK}"; echo "Assessment  : ${AI_REASON}"; }
