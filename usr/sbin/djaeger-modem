@@ -2,59 +2,28 @@
 . /usr/lib/djaeger-modem/common.sh
 [ -f /usr/lib/djaeger-modem/adaptive.sh ] && . /usr/lib/djaeger-modem/adaptive.sh
 [ -f /usr/lib/djaeger-modem/gemini.sh ] && . /usr/lib/djaeger-modem/gemini.sh
-VERSION='1.2-rc1'
-REPO_RAW='https://raw.githubusercontent.com/Djaeger1/DJAEGER-Modem-Intelligence/main'
-cmd="$1"
-remote_version(){ wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n '; }
-statev(){ sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
-case "$cmd" in
- status|health|'')
- [ -f "$STATE" ] || { echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; }
- state="$(statev state)"; score="$(statev score)"; cause="$(statev cause)"; confidence="$(statev confidence)"; modem="$(statev modem)"; service="$(statev service)"; sim="$(statev sim)"; wan_ip="$(statev wan_ip)"; rsrp="$(statev rsrp)"; rsrq="$(statev rsrq)"; rssi="$(statev rssi)"; sinr="$(statev sinr)"; pci="$(statev pci)"; cell_id="$(statev cell_id)"; gateway="$(statev gateway)"; internet="$(statev internet)"; dns="$(statev dns)"; self_heal="$(statev self_heal)"; adaptive_samples="$(statev adaptive_samples)"; adaptive_risk="$(statev adaptive_risk)"; adaptive_reason="$(statev adaptive_reason)"; last_action="$(statev last_action)"; recovery_count="$(statev recovery_count)"
- cat <<EOF
+VERSION='1.2-rc3'; REPO_RAW='https://raw.githubusercontent.com/Djaeger1/DJAEGER-Modem-Intelligence/main'; cmd="$1"
+remote_version(){ wget -qO- --timeout=8 "$REPO_RAW/VERSION" 2>/dev/null | tr -d '\r\n '; }; statev(){ sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
+status(){ [ -f "$STATE" ] || { echo 'DJAEGER Modem Intelligence: no state yet'; exit 1; }; state="$(statev state)"; score="$(statev score)"; cause="$(statev cause)"; confidence="$(statev confidence)"; root="$(statev root_domain)"; rr="$(statev root_reason)"; rc="$(statev root_confidence)"; sr="$(statev system_risk)"; ss="$(statev system_reason)"; modem="$(statev modem)"; service="$(statev service)"; sim="$(statev sim)"; wan_ip="$(statev wan_ip)"; rsrp="$(statev rsrp)"; rsrq="$(statev rsrq)"; sinr="$(statev sinr)"; gateway="$(statev gateway)"; internet="$(statev internet)"; dns="$(statev dns)"; self_heal="$(statev self_heal)"; adaptive_samples="$(statev adaptive_samples)"; adaptive_risk="$(statev adaptive_risk)"; adaptive_reason="$(statev adaptive_reason)"; last_action="$(statev last_action)"; recovery_count="$(statev recovery_count)"; recovery_stage="$(statev recovery_stage)"; cat <<EOF
 DJAEGER MODEM INTELLIGENCE v$VERSION
 State       : ${state:-UNKNOWN}
 Health      : ${score:-0}/100
-Cause       : ${cause:-UNKNOWN}
-Confidence  : ${confidence:-0}%
+Cause       : ${cause:-UNKNOWN} (${confidence:-0}%)
+Root Cause  : ${root:-UNKNOWN} / ${rr:-UNKNOWN} (${rc:-0}%)
+System Risk : ${sr:-0}/100 / ${ss:-UNKNOWN}
 Modem       : $([ "$modem" = 1 ] && echo ONLINE || echo OFFLINE)
-Service     : ${service:-NA}
-SIM         : ${sim:-NA}
+Service/SIM : ${service:-NA}/${sim:-NA}
 WAN IP      : ${wan_ip:-NONE}
-RSRP        : ${rsrp:-NA}
-RSRQ        : ${rsrq:-NA}
-RSSI        : ${rssi:-NA}
-SINR        : ${sinr:-NA}
-PCI         : ${pci:-NA}
-Cell ID     : ${cell_id:-NA}
+Radio       : RSRP=${rsrp:-NA} RSRQ=${rsrq:-NA} SINR=${sinr:-NA}
 Gateway     : $([ "$gateway" = 1 ] && echo OK || echo FAIL)
 Internet    : $([ "$internet" = 1 ] && echo OK || echo FAIL)
 DNS         : $([ "$dns" = 1 ] && echo OK || echo FAIL)
 Self-Heal   : $([ "$self_heal" = 1 ] && echo ENABLED-L1 || echo LOCKED)
+Modem L2    : $([ "$(uciopt allow_modem_post 0)" = 1 ] && [ "$(uciopt allow_modem_reboot 0)" = 1 ] && echo ENABLED || echo LOCKED)
 Adaptive AI : $([ "${adaptive_samples:-0}" -ge "$(uciopt baseline_min_samples 40)" ] 2>/dev/null && echo ACTIVE || echo LEARNING)
-AI Risk     : ${adaptive_risk:-0}/100
-AI Reason   : ${adaptive_reason:-LEARNING}
-Last Action : ${last_action:-NONE}
-Recoveries  : ${recovery_count:-0}/hour-window
+AI Risk     : ${adaptive_risk:-0}/100 / ${adaptive_reason:-LEARNING}
+Recovery    : stage=${recovery_stage:-0} action=${last_action:-NONE} count=${recovery_count:-0}
 EOF
- ;;
- intelligence|baseline) adaptive_status ;;
- gemini)
- case "$2" in
-  status|'') gemini_status ;;
-  set-key) printf 'Gemini API key: '; stty -echo 2>/dev/null || true; IFS= read -r K; stty echo 2>/dev/null || true; echo; [ -n "$K" ] || { echo 'Empty key rejected'; exit 1; }; printf '%s' "$K" | gemini_set_key; unset K; echo 'Gemini key stored securely. Advisor remains disabled; run: djaeger-modem gemini enable' ;;
-  clear-key) gemini_clear_key; uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini key removed; advisor disabled.' ;;
-  enable) [ -s "$GEMINI_KEY" ] || { echo 'Set API key first'; exit 1; }; uci set djaeger_modem.main.gemini_enabled='1'; uci commit djaeger_modem; echo 'Gemini advisor enabled.' ;;
-  disable) uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini advisor disabled; Local AI remains active.' ;;
-  *) echo 'Usage: djaeger-modem gemini {status|set-key|clear-key|enable|disable}'; exit 2;;
- esac ;;
- incidents) tail -n 20 "$INCIDENTS" 2>/dev/null || echo 'No incidents yet' ;;
- telemetry) tail -n 20 "$RING" 2>/dev/null || echo 'No telemetry yet' ;;
- logs) tail -n 50 "$LOG" 2>/dev/null || echo 'No logs yet' ;;
- version) echo "DJAEGER Modem Intelligence v$VERSION" ;;
- check-update) REMOTE="$(remote_version)"; [ -n "$REMOTE" ] || { echo 'Unable to check update'; exit 1; }; echo "Installed: $VERSION"; echo "Stable available: $REMOTE" ;;
- update) echo 'RC build cannot self-update from stable main.'; exit 1 ;;
- rollback) echo 'Use installer rollback snapshot if required.' ;;
- start|stop|restart) /etc/init.d/djaeger-modem "$cmd" ;;
- *) echo 'Usage: djaeger-modem {status|intelligence|gemini|incidents|telemetry|logs|version|start|stop|restart}'; exit 2 ;;
-esac
+}
+doctor(){ echo 'DJAEGER DOCTOR'; status; echo; gemini_status 2>/dev/null || true; echo "Daemon      : $(ps w | grep -q '[d]jaeger-modemd' && echo RUNNING || echo STOPPED)"; echo "Root Probe  : $([ -f /usr/lib/djaeger-modem/investigator.sh ] && echo AVAILABLE || echo MISSING)"; echo "System AI   : $([ -f /usr/lib/djaeger-modem/system-intelligence.sh ] && echo AVAILABLE || echo MISSING)"; }
+case "$cmd" in status|health|'') status;; doctor) doctor;; intelligence|baseline) adaptive_status;; gemini) case "$2" in status|'') gemini_status;; set-key) printf 'Gemini API key: '; stty -echo 2>/dev/null || true; IFS= read -r K; stty echo 2>/dev/null || true; echo; [ -n "$K" ] || { echo 'Empty key rejected'; exit 1; }; printf '%s' "$K" | gemini_set_key; unset K; echo 'Gemini key stored. Run: djaeger-modem gemini enable';; clear-key) gemini_clear_key; uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini key removed; advisor disabled.';; enable) [ -s "$GEMINI_KEY" ] || { echo 'Set API key first'; exit 1; }; uci set djaeger_modem.main.gemini_enabled='1'; uci commit djaeger_modem; echo 'Gemini Whole-System Advisor enabled.';; disable) uci set djaeger_modem.main.gemini_enabled='0'; uci commit djaeger_modem; echo 'Gemini disabled; Local AI remains active.';; *) echo 'Usage: djaeger-modem gemini {status|set-key|clear-key|enable|disable}'; exit 2;; esac;; incidents) tail -n 20 "$INCIDENTS" 2>/dev/null || echo 'No incidents yet';; telemetry) tail -n 20 "$RING" 2>/dev/null || echo 'No telemetry yet';; logs) tail -n 50 "$LOG" 2>/dev/null || echo 'No logs yet';; version) echo "DJAEGER Modem Intelligence v$VERSION";; check-update) REMOTE="$(remote_version)"; echo "Installed: $VERSION"; echo "Available: ${REMOTE:-UNKNOWN}";; start|stop|restart) /etc/init.d/djaeger-modem "$cmd";; *) echo 'Usage: djaeger-modem {status|doctor|intelligence|gemini|incidents|telemetry|logs|version|start|stop|restart}'; exit 2;; esac
