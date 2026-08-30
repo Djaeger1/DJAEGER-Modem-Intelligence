@@ -1,39 +1,15 @@
 #!/bin/sh
-# DJAEGER Connectivity Recovery Engine v1.2-rc2
-# Goal: restore Internet with the least disruptive verified action first.
+# DJAEGER staged recovery + outcome learning. No arbitrary cloud-to-shell execution.
 RECOVERY_LOG=/root/djaeger-modem/recovery-outcomes.csv
+RECOVERY_KNOWLEDGE=/root/djaeger-modem/recovery-knowledge.csv
 [ -f "$RECOVERY_LOG" ] || echo 'epoch,cause,action,result' > "$RECOVERY_LOG"
+[ -f "$RECOVERY_KNOWLEDGE" ] || echo 'epoch,root_domain,reason,action,result,duration,gemini_insight' > "$RECOVERY_KNOWLEDGE"
 recovery_record(){ printf '%s,%s,%s,%s\n' "$(date +%s)" "$1" "$2" "$3" >> "$RECOVERY_LOG"; }
-recovery_budget_ok(){
- CD="$(uciopt recovery_cooldown 300)"; MAX="$(uciopt max_recoveries_hour 2)"; N="$(date +%s)"
- [ $((N-LAST_RECOVERY)) -ge "$CD" ] 2>/dev/null || return 1
- if [ "$RECOVERY_WINDOW" -eq 0 ] || [ $((N-RECOVERY_WINDOW)) -ge 3600 ]; then RECOVERY_WINDOW=$N; RECOVERY_COUNT=0; fi
- [ "$RECOVERY_COUNT" -lt "$MAX" ] 2>/dev/null
-}
+recovery_learn(){ INS="$(sed -n 's/^advice=//p' /root/djaeger-modem/gemini/advisor.state 2>/dev/null | head -n1 | cut -c1-240)"; printf '%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s)" "${ROOT_DOMAIN:-UNKNOWN}" "$1" "$2" "$3" "$4" "${INS:-NONE}" >> "$RECOVERY_KNOWLEDGE"; }
+recovery_budget_ok(){ CD="$(uciopt recovery_cooldown 300)"; MAX="$(uciopt max_recoveries_hour 2)"; N="$(date +%s)"; [ $((N-LAST_RECOVERY)) -ge "$CD" ] 2>/dev/null || return 1; if [ "$RECOVERY_WINDOW" -eq 0 ] || [ $((N-RECOVERY_WINDOW)) -ge 3600 ]; then RECOVERY_WINDOW=$N; RECOVERY_COUNT=0; fi; [ "$RECOVERY_COUNT" -lt "$MAX" ] 2>/dev/null; }
 recovery_count_action(){ LAST_RECOVERY="$(date +%s)"; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); }
-recover_wan(){
- log "RECOVERY begin action=WAN_RECONNECT cause=$CAUSE"
- if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; recovery_count_action; recovery_record "$CAUSE" WAN_RECONNECT STARTED; CUR=RECOVERING; return 0; fi
- LAST_ACTION=WAN_RECONNECT_FAILED; recovery_count_action; recovery_record "$CAUSE" WAN_RECONNECT FAILED; return 1
-}
-huawei_post(){
- endpoint="$1"; body="$2"
- [ "$(uciopt allow_modem_post 0)" = 1 ] || return 1
- session || return 1
- curl -fsS --max-time 8 -H "Cookie: $SESSION" -H "__RequestVerificationToken: $TOKEN" -H 'Content-Type: application/xml' --data-binary "$body" "$MODEM_URL/api/$endpoint" >/dev/null 2>&1
-}
-recover_modem_reboot(){
- [ "$(uciopt allow_modem_reboot 0)" = 1 ] || return 1
- case "$CAUSE" in CELLULAR_SERVICE_LOST|SIM_OR_MODEM_SERVICE|DATA_SESSION_LOST) :;; *) return 1;; esac
- log "RECOVERY escalate action=MODEM_REBOOT cause=$CAUSE"
- if huawei_post device/control '<request><Control>1</Control></request>'; then LAST_ACTION=MODEM_REBOOT; recovery_count_action; recovery_record "$CAUSE" MODEM_REBOOT STARTED; CUR=RECOVERING; return 0; fi
- LAST_ACTION=MODEM_REBOOT_FAILED; recovery_count_action; recovery_record "$CAUSE" MODEM_REBOOT FAILED; return 1
-}
-recover_connectivity(){
- [ "$(uciopt self_heal 0)" = 1 ] || return 1
- recovery_budget_ok || { log 'RECOVERY_BLOCKED budget_or_cooldown'; return 1; }
- # L1 remains first choice. Modem reboot is optional escalation and is disabled by default.
- [ "$(uciopt allow_wan_reconnect 0)" = 1 ] && recover_wan && return 0
- recover_modem_reboot && return 0
- return 1
-}
+recover_wan(){ log "RECOVERY L1 action=WAN_RECONNECT domain=${ROOT_DOMAIN:-UNKNOWN}"; if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; recovery_count_action; recovery_record "${ROOT_REASON:-$CAUSE}" WAN_RECONNECT STARTED; return 0; fi; LAST_ACTION=WAN_RECONNECT_FAILED; recovery_count_action; recovery_record "${ROOT_REASON:-$CAUSE}" WAN_RECONNECT FAILED; return 1; }
+modem_budget_ok(){ N="$(date +%s)"; CD="$(uciopt modem_reboot_cooldown 900)"; MAX="$(uciopt max_modem_reboots_hour 1)"; F=/tmp/djaeger-modem-reboots; LAST="$(tail -n1 "$F" 2>/dev/null)"; case "$LAST" in ''|*[!0-9]*) LAST=0;; esac; [ $((N-LAST)) -ge "$CD" ] 2>/dev/null || return 1; CNT="$(awk -v n="$N" '$1>=n-3600{c++}END{print c+0}' "$F" 2>/dev/null)"; [ "$CNT" -lt "$MAX" ] 2>/dev/null; }
+modem_post_reboot(){ [ "$(uciopt allow_modem_post 0)" = 1 ] || return 1; [ "$(uciopt allow_modem_reboot 0)" = 1 ] || return 1; session || return 1; curl -fsS --max-time 8 -H "Cookie: $SESSION" -H "__RequestVerificationToken: $TOKEN" -H 'Content-Type: application/xml' --data-binary '<request><Control>1</Control></request>' "$MODEM_URL/api/device/control" >/dev/null 2>&1; }
+recover_modem_reboot(){ case "${ROOT_DOMAIN:-UNKNOWN}" in CELLULAR|MODEM|MODEM_DATA_SESSION|UPSTREAM_OR_MODEM) :;; *) return 1;; esac; modem_budget_ok || { log 'MODEM_REBOOT_BLOCKED cooldown_or_budget'; return 1; }; log "RECOVERY L2 action=MODEM_REBOOT domain=$ROOT_DOMAIN"; if modem_post_reboot; then LAST_ACTION=MODEM_REBOOT; date +%s >> /tmp/djaeger-modem-reboots; recovery_record "${ROOT_REASON:-$CAUSE}" MODEM_REBOOT STARTED; return 0; fi; LAST_ACTION=MODEM_REBOOT_FAILED; recovery_record "${ROOT_REASON:-$CAUSE}" MODEM_REBOOT FAILED; return 1; }
+recover_connectivity(){ [ "$(uciopt self_heal 0)" = 1 ] || return 1; recovery_budget_ok || { log 'RECOVERY_BLOCKED budget_or_cooldown'; return 1; }; [ "$(uciopt allow_wan_reconnect 0)" = 1 ] || return 1; recover_wan; }
