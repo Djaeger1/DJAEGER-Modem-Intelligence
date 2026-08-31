@@ -1,14 +1,28 @@
 #!/bin/sh
-# DJAEGER staged recovery + outcome learning. No arbitrary cloud-to-shell execution.
-RECOVERY_LOG=/root/djaeger-modem/recovery-outcomes.csv; RECOVERY_KNOWLEDGE=/root/djaeger-modem/recovery-knowledge.csv
-[ -f "$RECOVERY_LOG" ] || echo 'epoch,cause,action,result' > "$RECOVERY_LOG"; [ -f "$RECOVERY_KNOWLEDGE" ] || echo 'epoch,root_domain,reason,action,result,duration,gemini_insight' > "$RECOVERY_KNOWLEDGE"
+# DJAEGER Huawei Cellular Recovery State Machine v3
+# Typed local recovery only; Gemini never executes root commands.
+RECOVERY_LOG=/root/djaeger-modem/recovery-outcomes.csv
+RECOVERY_KNOWLEDGE=/root/djaeger-modem/recovery-knowledge.csv
+CELLENGINE=/usr/lib/djaeger-modem/cellular-state-engine.sh
+CELLSTATE=/tmp/djaeger-modem/cellular-state
+[ -f "$RECOVERY_LOG" ] || echo 'epoch,cause,action,result' > "$RECOVERY_LOG"
+[ -f "$RECOVERY_KNOWLEDGE" ] || echo 'epoch,root_domain,reason,action,result,duration,gemini_insight' > "$RECOVERY_KNOWLEDGE"
 recovery_record(){ printf '%s,%s,%s,%s\n' "$(date +%s)" "$1" "$2" "$3" >> "$RECOVERY_LOG"; }
-recovery_learn(){ INS="$(sed -n 's/^advice=//p' /root/djaeger-modem/gemini/advisor.state 2>/dev/null | head -n1 | tr ',' ';' | cut -c1-240)"; printf '%s,%s,%s,%s,%s,%s,%s\n' "$(date +%s)" "${ROOT_DOMAIN:-UNKNOWN}" "$1" "$2" "$3" "$4" "${INS:-NONE}" >> "$RECOVERY_KNOWLEDGE"; }
-recovery_budget_ok(){ CD="$(uciopt recovery_cooldown 300)"; MAX="$(uciopt max_recoveries_hour 2)"; N="$(date +%s)"; [ $((N-LAST_RECOVERY)) -ge "$CD" ] 2>/dev/null || return 1; if [ "$RECOVERY_WINDOW" -eq 0 ] || [ $((N-RECOVERY_WINDOW)) -ge 3600 ]; then RECOVERY_WINDOW=$N; RECOVERY_COUNT=0; fi; [ "$RECOVERY_COUNT" -lt "$MAX" ] 2>/dev/null; }
-recovery_count_action(){ LAST_RECOVERY="$(date +%s)"; RECOVERY_COUNT=$((RECOVERY_COUNT+1)); }
-recover_wan(){ log "RECOVERY L1 action=WAN_RECONNECT domain=${ROOT_DOMAIN:-UNKNOWN}"; if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; recovery_count_action; recovery_record "${ROOT_REASON:-$CAUSE}" WAN_RECONNECT STARTED; return 0; fi; LAST_ACTION=WAN_RECONNECT_FAILED; recovery_count_action; recovery_record "${ROOT_REASON:-$CAUSE}" WAN_RECONNECT FAILED; return 1; }
-modem_budget_ok(){ N="$(date +%s)"; CD="$(uciopt modem_reboot_cooldown 900)"; MAX="$(uciopt max_modem_reboots_hour 1)"; F=/tmp/djaeger-modem-reboots; LAST="$(tail -n1 "$F" 2>/dev/null)"; case "$LAST" in ''|*[!0-9]*) LAST=0;; esac; [ $((N-LAST)) -ge "$CD" ] 2>/dev/null || return 1; CNT="$(awk -v n="$N" '$1>=n-3600{c++}END{print c+0}' "$F" 2>/dev/null)"; [ "$CNT" -lt "$MAX" ] 2>/dev/null; }
-# Exact typed Huawei action only. Endpoint remains disabled by default until validated on the target modem firmware.
-modem_post_reboot(){ [ "$(uciopt allow_modem_post 0)" = 1 ] || return 1; [ "$(uciopt allow_modem_reboot 0)" = 1 ] || return 1; session || return 1; curl -fsS --max-time 8 -H "Cookie: $SESSION" -H "__RequestVerificationToken: $TOKEN" -H 'Content-Type: application/xml' --data-binary '<request><Control>1</Control></request>' "$MODEM_URL/api/device/control" >/dev/null 2>&1; }
-recover_modem_reboot(){ case "${ROOT_DOMAIN:-UNKNOWN}" in CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) :;; *) return 1;; esac; modem_budget_ok || { log 'MODEM_REBOOT_BLOCKED cooldown_or_budget'; return 1; }; log "RECOVERY L2 action=MODEM_REBOOT domain=$ROOT_DOMAIN"; if modem_post_reboot; then LAST_ACTION=MODEM_REBOOT; date +%s >> /tmp/djaeger-modem-reboots; recovery_record "${ROOT_REASON:-$CAUSE}" MODEM_REBOOT STARTED; return 0; fi; LAST_ACTION=MODEM_REBOOT_FAILED; recovery_record "${ROOT_REASON:-$CAUSE}" MODEM_REBOOT FAILED; return 1; }
-recover_connectivity(){ [ "$(uciopt self_heal 0)" = 1 ] || return 1; recovery_budget_ok || { log 'RECOVERY_BLOCKED budget_or_cooldown'; return 1; }; [ "$(uciopt allow_wan_reconnect 0)" = 1 ] || return 1; recover_wan; }
+cellv(){ sed -n "s/^$1=//p" "$CELLSTATE" 2>/dev/null | head -n1; }
+refresh_cell(){ [ -x "$CELLENGINE" ] && "$CELLENGINE" >/dev/null 2>&1; }
+phase_log(){ log "MODEM_PHASE phase=$1 domain=${ROOT_DOMAIN:-UNKNOWN}"; }
+wait_phase(){ PH="$1"; LIMIT="$2"; I=0; phase_log "$PH"; while [ "$I" -lt "$LIMIT" ]; do refresh_cell || true; GW="$(cellv gateway)"; API="$(cellv api)"; SIM="$(cellv sim_status)"; PLMN="$(cellv plmn)"; ATT="$(cellv packet_attached)"; IP="$(cellv cellular_wan)"; NET="$(cellv internet)"; case "$PH" in WAIT_BOOT) [ "$GW" = UP ] && return 0;; WAIT_API) [ "$API" = 1 ] && return 0;; WAIT_SIM) [ "$SIM" = 1 ] && return 0;; WAIT_PLMN) [ -n "$PLMN" ] && [ "$PLMN" != UNKNOWN ] && [ "$PLMN" != 0 ] && return 0;; WAIT_REGISTRATION) [ "$ATT" = 1 ] && return 0;; WAIT_DATA_SESSION) [ -n "$IP" ] && [ "$IP" != NONE ] && [ "$IP" != 0.0.0.0 ] && return 0;; VERIFY_INTERNET) [ "$NET" = UP ] && return 0;; esac; sleep 2; I=$((I+2)); done; return 1; }
+modem_budget_ok(){ N="$(date +%s)"; CD="$(uciopt modem_reboot_cooldown 120)"; MAX="$(uciopt max_modem_reboots_hour 3)"; F=/tmp/djaeger-modem-reboots; LAST="$(tail -n1 "$F" 2>/dev/null)"; case "$LAST" in ''|*[!0-9]*) LAST=0;; esac; [ $((N-LAST)) -ge "$CD" ] 2>/dev/null || return 1; CNT="$(awk -v n="$N" '$1>=n-3600{c++}END{print c+0}' "$F" 2>/dev/null)"; [ "$CNT" -lt "$MAX" ] 2>/dev/null; }
+modem_post_reboot(){ [ "$(uciopt allow_modem_post 0)" = 1 ] && [ "$(uciopt allow_modem_reboot 0)" = 1 ] || return 1; session || return 1; curl -fsS --max-time 8 -H "Cookie: $SESSION" -H "__RequestVerificationToken: $TOKEN" -H 'Content-Type: application/xml' --data-binary '<request><Control>1</Control></request>' "$MODEM_URL/api/device/control" >/dev/null 2>&1; }
+recover_modem_reboot(){ case "${ROOT_DOMAIN:-UNKNOWN}" in CELLULAR|MODEM|MODEM_PROVIDER|MODEM_DATA_SESSION|PLMN_VISIBLE_NOT_REGISTERED|REGISTRATION_STUCK|REGISTERED_NO_DATA_SESSION|DATA_SESSION_STALLED|RADIO_OR_PROVIDER_UNAVAILABLE|MULTI_FACTOR|UNKNOWN) :;; *) return 1;; esac; modem_budget_ok || { log 'MODEM_REBOOT_BLOCKED cooldown_or_budget'; return 1; }; START="$(date +%s)"; log "RECOVERY action=MODEM_REBOOT domain=$ROOT_DOMAIN"; modem_post_reboot || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT POST_FAILED; return 1; }; date +%s >> /tmp/djaeger-modem-reboots; LAST_ACTION=MODEM_REBOOT; recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT STARTED
+ # E3276 observed USB reboot is ~10-12s, but cellular registration may take substantially longer.
+ wait_phase WAIT_BOOT 35 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_BOOT_FAILED; return 1; }
+ wait_phase WAIT_API 30 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_API_FAILED; return 1; }
+ wait_phase WAIT_SIM 20 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_SIM_FAILED; return 1; }
+ wait_phase WAIT_PLMN 40 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_PLMN_FAILED; return 1; }
+ wait_phase WAIT_REGISTRATION 60 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_REGISTRATION_FAILED; return 1; }
+ wait_phase WAIT_DATA_SESSION 45 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT WAIT_DATA_SESSION_FAILED; return 1; }
+ wait_phase VERIFY_INTERNET 30 || { recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT VERIFY_INTERNET_FAILED; return 1; }
+ DUR=$(( $(date +%s)-START )); recovery_record "${ROOT_REASON:-UNKNOWN}" MODEM_REBOOT SUCCESS; log "MODEM_RECOVERED duration=${DUR}s"; return 0; }
+recover_wan(){ log "RECOVERY action=WAN_RECONNECT domain=${ROOT_DOMAIN:-UNKNOWN}"; if ifup wan >/dev/null 2>&1; then LAST_ACTION=WAN_RECONNECT; recovery_record "${ROOT_REASON:-UNKNOWN}" WAN_RECONNECT STARTED; return 0; fi; recovery_record "${ROOT_REASON:-UNKNOWN}" WAN_RECONNECT FAILED; return 1; }
+recover_connectivity(){ [ "$(uciopt self_heal 0)" = 1 ] || return 1; [ "$(uciopt allow_wan_reconnect 0)" = 1 ] || return 1; recover_wan; }
