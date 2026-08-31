@@ -1,16 +1,51 @@
 #!/bin/sh
-# DJAEGER Local AI Policy Authority v2. Gemini may propose; Local AI validates and owns policy.
+# DJAEGER Local Cellular AI Policy Authority v3
+# Gemini may formulate/refine policy online; Local AI validates, stores and owns runtime policy.
 POLICY=/tmp/djaeger-local-ai.policy
 AI=/tmp/djaeger-modem/state
 OUT=/root/djaeger-modem/watchdog-outcomes.csv
 LEARNED=/root/djaeger-modem/local-ai-learned.policy
+PROVIDER=/etc/djaeger-modem/providers/xl.policy
+[ -f "$PROVIDER" ] || PROVIDER=/usr/share/djaeger-modem/providers/xl.policy
 umask 077
-valid_action(){ case "$1" in WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;; *) return 1;; esac; }
-valid_domain(){ case "$1" in OPENWRT_DNS|DNS_UPSTREAM|OPENWRT_SYSTEM|OPENWRT_WAN|OPENWRT_ROUTING|UPSTREAM|CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR|UNKNOWN|HEALTHY) return 0;; *) return 1;; esac; }
+valid_action(){ case "$1" in NONE|WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;; *) return 1;; esac; }
+valid_domain(){ case "$1" in OPENWRT_DNS|DNS_UPSTREAM|OPENWRT_SYSTEM|OPENWRT_WAN|OPENWRT_ROUTING|UPSTREAM|CELLULAR|MODEM|MODEM_PROVIDER|MODEM_DATA_SESSION|PLMN_VISIBLE_NOT_REGISTERED|REGISTRATION_STUCK|REGISTERED_NO_DATA_SESSION|DATA_SESSION_STALLED|RADIO_OR_PROVIDER_UNAVAILABLE|MULTI_FACTOR|UNKNOWN|HEALTHY) return 0;; *) return 1;; esac; }
 get_domain(){ sed -n 's/^root_domain=//p' "$AI" 2>/dev/null | head -n1; }
 learned_get(){ sed -n "s/^$1=//p" "$LEARNED" 2>/dev/null | head -n1; }
-defaults(){ case "$1" in OPENWRT_DNS|DNS_UPSTREAM) A1=DNSMASQ_RESTART; A2=WAN_RECONNECT; A3=NETIFD_RESTART;; OPENWRT_SYSTEM) A1=NETIFD_RESTART; A2=WAN_RECONNECT; A3=MODEM_REBOOT;; CELLULAR|MODEM|MODEM_DATA_SESSION|MULTI_FACTOR) A1=WAN_RECONNECT; A2=MODEM_REBOOT; A3=NETIFD_RESTART;; *) A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT;; esac; V1=2; V2=4; SOURCE=DETERMINISTIC; }
-compile(){ D="$(get_domain)"; [ -n "$D" ] || D=UNKNOWN; valid_domain "$D" || D=UNKNOWN; defaults "$D"; LD="$(learned_get domain)"; if [ "$LD" = "$D" ]; then L1="$(learned_get action1)"; L2="$(learned_get action2)"; L3="$(learned_get action3)"; C="$(learned_get confidence)"; case "$C" in ''|*[!0-9]*) C=0;; esac; if [ "$C" -ge 80 ] && valid_action "$L1" && valid_action "$L2" && valid_action "$L3" && [ "$L1" != MODEM_REBOOT ]; then A1="$L1"; A2="$L2"; A3="$L3"; SOURCE=GEMINI_VALIDATED; fi; fi; T="$POLICY.$$"; printf 'version=2\ngenerated=%s\ndomain=%s\nsource=%s\naction1=%s\naction2=%s\naction3=%s\nverify1=%s\nverify2=%s\n' "$(date +%s)" "$D" "$SOURCE" "$A1" "$A2" "$A3" "$V1" "$V2" > "$T" && chmod 600 "$T" && mv "$T" "$POLICY"; }
-propose(){ D="$2"; A1="$3"; A2="$4"; A3="$5"; C="$6"; valid_domain "$D" || return 1; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1; [ "$A1" != MODEM_REBOOT ] || return 1; case "$C" in ''|*[!0-9]*) return 1;; esac; [ "$C" -ge 80 ] && [ "$C" -le 100 ] || return 1; T="$LEARNED.$$"; printf 'version=1\nupdated=%s\nsource=GEMINI_VALIDATED\ndomain=%s\naction1=%s\naction2=%s\naction3=%s\nconfidence=%s\n' "$(date +%s)" "$D" "$A1" "$A2" "$A3" "$C" > "$T" && chmod 600 "$T" && mv "$T" "$LEARNED"; }
+provider_get(){ sed -n "s/^$1=//p" "$PROVIDER" 2>/dev/null | head -n1; }
+defaults(){
+ case "$1" in
+  HEALTHY) A1=NONE; A2=NONE; A3=NONE;;
+  OPENWRT_DNS|DNS_UPSTREAM) A1=DNSMASQ_RESTART; A2=WAN_RECONNECT; A3=NETIFD_RESTART;;
+  OPENWRT_SYSTEM) A1=NETIFD_RESTART; A2=WAN_RECONNECT; A3=MODEM_REBOOT;;
+  OPENWRT_WAN|OPENWRT_ROUTING) A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT;;
+  PLMN_VISIBLE_NOT_REGISTERED|REGISTRATION_STUCK|RADIO_OR_PROVIDER_UNAVAILABLE|MODEM_PROVIDER|CELLULAR|MODEM) A1=MODEM_REBOOT; A2=MODEM_REBOOT; A3=NETIFD_RESTART;;
+  REGISTERED_NO_DATA_SESSION|MODEM_DATA_SESSION|DATA_SESSION_STALLED) A1=WAN_RECONNECT; A2=MODEM_REBOOT; A3=MODEM_REBOOT;;
+  *) A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT;;
+ esac
+ # Action-specific verification windows. Modem reboot is never judged after a few seconds.
+ V_WAN=12; V_SERVICE=20; V_MODEM=120; SOURCE=DETERMINISTIC_CELLULAR_V3
+}
+compile(){
+ D="$(get_domain)"; [ -n "$D" ] || D=UNKNOWN; valid_domain "$D" || D=UNKNOWN; defaults "$D"
+ LD="$(learned_get domain)"
+ if [ "$LD" = "$D" ]; then
+  L1="$(learned_get action1)"; L2="$(learned_get action2)"; L3="$(learned_get action3)"; C="$(learned_get confidence)"
+  case "$C" in ''|*[!0-9]*) C=0;; esac
+  if [ "$C" -ge 80 ] && valid_action "$L1" && valid_action "$L2" && valid_action "$L3"; then A1="$L1"; A2="$L2"; A3="$L3"; SOURCE=GEMINI_VALIDATED_LOCAL_AI; fi
+ fi
+ GOV="$(provider_get allow_local_traffic_governor)"; [ "$GOV" = 1 ] || GOV=0
+ LIMIT_EVID="$(provider_get bandwidth_limit_requires_evidence)"; [ "$LIMIT_EVID" = 1 ] || LIMIT_EVID=1
+ T="$POLICY.$$"
+ printf 'version=3\ngenerated=%s\ndomain=%s\nsource=%s\naction1=%s\naction2=%s\naction3=%s\nverify_wan=%s\nverify_service=%s\nverify_modem=%s\nprovider=XL\ntraffic_governor=%s\nbandwidth_limit_requires_evidence=%s\n' "$(date +%s)" "$D" "$SOURCE" "$A1" "$A2" "$A3" "$V_WAN" "$V_SERVICE" "$V_MODEM" "$GOV" "$LIMIT_EVID" > "$T" && chmod 600 "$T" && mv "$T" "$POLICY"
+}
+propose(){
+ D="$2"; A1="$3"; A2="$4"; A3="$5"; C="$6"
+ valid_domain "$D" || return 1; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1
+ case "$C" in ''|*[!0-9]*) return 1;; esac; [ "$C" -ge 80 ] && [ "$C" -le 100 ] || return 1
+ # Gemini cannot propose disruptive action for a healthy domain.
+ [ "$D" != HEALTHY ] || { [ "$A1" = NONE ] && [ "$A2" = NONE ] && [ "$A3" = NONE ]; } || return 1
+ T="$LEARNED.$$"; printf 'version=2\nupdated=%s\nsource=GEMINI_VALIDATED\ndomain=%s\naction1=%s\naction2=%s\naction3=%s\nconfidence=%s\n' "$(date +%s)" "$D" "$A1" "$A2" "$A3" "$C" > "$T" && chmod 600 "$T" && mv "$T" "$LEARNED"
+}
 record(){ mkdir -p /root/djaeger-modem; [ -f "$OUT" ] || printf 'epoch,domain,action,result,recovery_ms\n' > "$OUT"; printf '%s,%s,%s,%s,%s\n' "$(date +%s)" "$2" "$3" "$4" "$5" >> "$OUT"; chmod 600 "$OUT"; tail -n 1000 "$OUT" > "$OUT.tmp" && chmod 600 "$OUT.tmp" && mv "$OUT.tmp" "$OUT"; }
 case "$1" in compile|'') compile;; propose) propose "$@";; record) shift; record x "$@";; *) exit 2;; esac
