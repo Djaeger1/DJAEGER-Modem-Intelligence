@@ -1,29 +1,31 @@
 #!/bin/sh
-# DJAEGER Fast Watchdog v6 - reflex -> classify -> plan -> execute -> reclassify.
+# DJAEGER Fast Watchdog v7 - reflex -> classify -> plan -> episode-aware escalate -> verify.
 STATE=/tmp/djaeger-fast-watchdog.state; POLICY=/tmp/djaeger-local-ai.policy; AI_STATE=/tmp/djaeger-modem/state; CELL_STATE=/tmp/djaeger-modem/cellular-state
 LOCALAI=/usr/lib/djaeger-modem/local-ai-policy.sh; CELLENGINE=/usr/lib/djaeger-modem/cellular-state-engine.sh
 SLEEP=${DJAEGER_WATCHDOG_INTERVAL:-1}; MAX_RECOVERY_WAIT=${DJAEGER_MAX_RECOVERY_WAIT:-180}; umask 077
 . /usr/lib/djaeger-modem/common.sh; . /usr/lib/djaeger-modem/recovery.sh; . /usr/lib/djaeger-modem/root-broker.sh
-probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
-kv(){ sed -n "s/^$1=//p" "$POLICY" 2>/dev/null|head -n1; }; ckv(){ sed -n "s/^$1=//p" "$CELL_STATE" 2>/dev/null|head -n1; }
-valid_action(){ case "$1" in NONE|WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;;*) return 1;;esac; }
-write_state(){ T="$STATE.$$"; printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=%s\ncellular_confidence=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" "${SOURCE:-LOCAL_AI}" "${CCONF:-0}" >"$T"; chmod 600 "$T"; mv "$T" "$STATE"; }
-refresh_cellular(){ [ -x "$CELLENGINE" ] && "$CELLENGINE" >/dev/null 2>&1 || return 1; DOMAIN="$(ckv root_domain)"; CCONF="$(ckv confidence)"; [ -n "$DOMAIN" ] || return 1; case "$CCONF" in ''|*[!0-9]*) CCONF=0;;esac; T="$AI_STATE.$$"; [ -f "$AI_STATE" ] && grep -v -E '^(root_domain|cellular_confidence|cellular_state_epoch)=' "$AI_STATE" >"$T" 2>/dev/null || : >"$T"; printf 'root_domain=%s\ncellular_confidence=%s\ncellular_state_epoch=%s\n' "$DOMAIN" "$CCONF" "$(ckv epoch)" >>"$T"; chmod 600 "$T"; mv "$T" "$AI_STATE"; }
-load_policy(){ "$LOCALAI" compile >/dev/null 2>&1 || return 1; DOMAIN="$(kv domain)"; SOURCE="$(kv source)"; A1="$(kv action1)"; A2="$(kv action2)"; A3="$(kv action3)"; VW="$(kv verify_wan)"; VS="$(kv verify_service)"; valid_action "$A1"&&valid_action "$A2"&&valid_action "$A3"; }
+probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1||ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
+kv(){ sed -n "s/^$1=//p" "$POLICY" 2>/dev/null|head -n1; };ckv(){ sed -n "s/^$1=//p" "$CELL_STATE" 2>/dev/null|head -n1; }
+valid_action(){ case "$1" in NONE|WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT)return 0;;*)return 1;;esac; }
+write_state(){ T="$STATE.$$";printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=%s\ncellular_confidence=%s\nepisode=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" "${SOURCE:-LOCAL_AI}" "${CCONF:-0}" "${EPISODE:-0}" >"$T";chmod 600 "$T";mv "$T" "$STATE"; }
+refresh_cellular(){ [ -x "$CELLENGINE" ]&&"$CELLENGINE" >/dev/null 2>&1||return 1;DOMAIN="$(ckv root_domain)";CCONF="$(ckv confidence)";[ -n "$DOMAIN" ]||return 1;case "$CCONF" in ''|*[!0-9]*)CCONF=0;;esac;T="$AI_STATE.$$";[ -f "$AI_STATE" ]&&grep -v -E '^(root_domain|cellular_confidence|cellular_state_epoch)=' "$AI_STATE">"$T" 2>/dev/null||: >"$T";printf 'root_domain=%s\ncellular_confidence=%s\ncellular_state_epoch=%s\n' "$DOMAIN" "$CCONF" "$(ckv epoch)" >>"$T";chmod 600 "$T";mv "$T" "$AI_STATE"; }
+load_policy(){ "$LOCALAI" compile >/dev/null 2>&1||return 1;DOMAIN="$(kv domain)";SOURCE="$(kv source)";A1="$(kv action1)";A2="$(kv action2)";A3="$(kv action3)";VW="$(kv verify_wan)";VS="$(kv verify_service)";valid_action "$A1"&&valid_action "$A2"&&valid_action "$A3"; }
 record(){ [ -x "$LOCALAI" ]&&"$LOCALAI" record "$DOMAIN" "$1" "$2" "$3" >/dev/null 2>&1; }
-wait_net(){ N="$1"; I=0; while [ "$I" -lt "$N" ]; do probe&&return 0; sleep 2; I=$((I+2)); done; return 1; }
-run_step(){ A="$1"; [ "$A" = NONE ]&&return 1; ROOT_DOMAIN="$DOMAIN"; CUR=RECOVERING; LAST_ACTION="$A"; broker_execute WATCHDOG "$A"||return 1; # MODEM_REBOOT owns its complete phase-aware verification in recovery.sh.
- [ "$A" = MODEM_REBOOT ]&&return 0; case "$A" in WAN_RECONNECT) W="$VW";;*) W="$VS";;esac; wait_net "$W"&&return 0; broker_log WATCHDOG "$A" FAILED ACTION_WINDOW_EXPIRED; return 1; }
-LAST_ACTION=NONE; DOMAIN=UNKNOWN; SOURCE=LOCAL_AI; CCONF=0; write_state STANDBY
-while :; do
- probe&&{ sleep "$SLEEP"; continue; }; START="$(date +%s)"; write_state TRIGGERED; sleep 1; probe&&{ write_state STANDBY; continue; }
- refresh_cellular||{ DOMAIN=UNKNOWN; CCONF=0; SOURCE=SAFE_FALLBACK; }; load_policy||{ DOMAIN=UNKNOWN; SOURCE=SAFE_FALLBACK; A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT; VW=12; VS=20; }; write_state RECOVERING; SUCCESS=0; ATTEMPT=1
- while [ "$ATTEMPT" -le 3 ]; do
-  # Always recompile after state refresh; execute only the current plan's first action.
-  A="$A1"; [ "$A" = NONE ]&&break
-  if run_step "$A"; then MS=$((($(date +%s)-START)*1000)); record "$A" SUCCESS "$MS"; SUCCESS=1; break; fi
-  MS=$((($(date +%s)-START)*1000)); record "$A" FAILED "$MS"; refresh_cellular||true; load_policy||true; ATTEMPT=$((ATTEMPT+1))
+wait_net(){ N="$1";I=0;while [ "$I" -lt "$N" ];do probe&&return 0;sleep 2;I=$((I+2));done;return 1; }
+run_step(){ A="$1";[ "$A" = NONE ]&&return 1;ROOT_DOMAIN="$DOMAIN";CUR=RECOVERING;LAST_ACTION="$A";broker_execute WATCHDOG "$A"||return 1;[ "$A" = MODEM_REBOOT ]&&return 0;case "$A" in WAN_RECONNECT)W="$VW";;*)W="$VS";;esac;wait_net "$W"&&return 0;broker_log WATCHDOG "$A" FAILED ACTION_WINDOW_EXPIRED;return 1; }
+# Select first not-yet-failed action in current plan. If state changes, new actions remain eligible, but a failed action is never repeated in the same outage episode.
+failed_has(){ case ",${FAILED_ACTIONS:-}," in *,$1,*)return 0;;*)return 1;;esac; }
+mark_failed(){ failed_has "$1"||FAILED_ACTIONS="${FAILED_ACTIONS:+$FAILED_ACTIONS,}$1"; }
+select_action(){ for X in "$A1" "$A2" "$A3";do [ "$X" = NONE ]&&continue;failed_has "$X"&&continue;printf '%s\n' "$X";return 0;done;printf 'NONE\n'; }
+LAST_ACTION=NONE;DOMAIN=UNKNOWN;SOURCE=LOCAL_AI;CCONF=0;EPISODE=0;write_state STANDBY
+while :;do
+ probe&&{ sleep "$SLEEP";continue; };START="$(date +%s)";EPISODE="$START";FAILED_ACTIONS='';write_state TRIGGERED;sleep 1;probe&&{ write_state STANDBY;continue; }
+ refresh_cellular||{ DOMAIN=UNKNOWN;CCONF=0;SOURCE=SAFE_FALLBACK; };load_policy||{ DOMAIN=UNKNOWN;SOURCE=SAFE_FALLBACK;A1=WAN_RECONNECT;A2=NETIFD_RESTART;A3=MODEM_REBOOT;VW=12;VS=20; };write_state RECOVERING;SUCCESS=0;ATTEMPT=1
+ while [ "$ATTEMPT" -le 3 ];do
+  A="$(select_action)";[ "$A" = NONE ]&&break
+  if run_step "$A";then MS=$((($(date +%s)-START)*1000));record "$A" SUCCESS "$MS";SUCCESS=1;break;fi
+  MS=$((($(date +%s)-START)*1000));record "$A" FAILED "$MS";mark_failed "$A";refresh_cellular||true;load_policy||true;ATTEMPT=$((ATTEMPT+1))
  done
- if [ "$SUCCESS" = 0 ]&&wait_net "$MAX_RECOVERY_WAIT"; then MS=$((($(date +%s)-START)*1000)); refresh_cellular||true; record "$LAST_ACTION" DELAYED_RECOVERY "$MS"; SUCCESS=1; fi
- if [ "$SUCCESS" = 1 ]; then refresh_cellular||true; write_state RECOVERED; sleep 1; else write_state OUTAGE_UNRESOLVED; sleep 2; fi
+ if [ "$SUCCESS" = 0 ]&&wait_net "$MAX_RECOVERY_WAIT";then MS=$((($(date +%s)-START)*1000));refresh_cellular||true;record "$LAST_ACTION" DELAYED_RECOVERY "$MS";SUCCESS=1;fi
+ if [ "$SUCCESS" = 1 ];then refresh_cellular||true;write_state RECOVERED;sleep 1;else write_state OUTAGE_UNRESOLVED;sleep 2;fi
 done
