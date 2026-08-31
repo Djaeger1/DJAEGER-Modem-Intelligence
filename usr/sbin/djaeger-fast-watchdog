@@ -1,8 +1,11 @@
 #!/bin/sh
-# DJAEGER Fast Watchdog v4 - ultra-fast reflex, Local AI controlled, bounded recovery.
+# DJAEGER Fast Watchdog v5 - reflex sensor -> Cellular State Engine -> Local AI -> Root Broker.
 STATE=/tmp/djaeger-fast-watchdog.state
 POLICY=/tmp/djaeger-local-ai.policy
+AI_STATE=/tmp/djaeger-modem/state
+CELL_STATE=/tmp/djaeger-modem/cellular-state
 LOCALAI=/usr/lib/djaeger-modem/local-ai-policy.sh
+CELLENGINE=/usr/lib/djaeger-modem/cellular-state-engine.sh
 SLEEP=${DJAEGER_WATCHDOG_INTERVAL:-1}
 MAX_RECOVERY_WAIT=${DJAEGER_MAX_RECOVERY_WAIT:-180}
 umask 077
@@ -10,29 +13,35 @@ umask 077
 . /usr/lib/djaeger-modem/recovery.sh
 . /usr/lib/djaeger-modem/root-broker.sh
 probe(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
-gateway(){ ping -c1 -W1 "${GW:-192.168.8.1}" >/dev/null 2>&1; }
 kv(){ sed -n "s/^$1=//p" "$POLICY" 2>/dev/null | head -n1; }
+ckv(){ sed -n "s/^$1=//p" "$CELL_STATE" 2>/dev/null | head -n1; }
 valid_action(){ case "$1" in NONE|WAN_RECONNECT|DNSMASQ_RESTART|NETIFD_RESTART|MODEM_REBOOT) return 0;; *) return 1;; esac; }
-write_state(){ T="$STATE.$$"; printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=%s\ngateway=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" "${SOURCE:-LOCAL_AI}" "${GWSTATE:-UNKNOWN}" > "$T"; chmod 600 "$T"; mv "$T" "$STATE"; }
+write_state(){ T="$STATE.$$"; printf 'state=%s\nupdated=%s\nlast_action=%s\npolicy_domain=%s\npolicy_source=%s\ncellular_confidence=%s\n' "$1" "$(date +%s)" "${LAST_ACTION:-NONE}" "${DOMAIN:-UNKNOWN}" "${SOURCE:-LOCAL_AI}" "${CCONF:-0}" > "$T"; chmod 600 "$T"; mv "$T" "$STATE"; }
+refresh_cellular(){ [ -x "$CELLENGINE" ] || return 1; "$CELLENGINE" >/dev/null 2>&1 || return 1; D="$(ckv root_domain)"; C="$(ckv confidence)"; [ -n "$D" ] || return 1; case "$C" in ''|*[!0-9]*) C=0;; esac; DOMAIN="$D"; CCONF="$C"; # publish only classification to Local AI state, preserving other evidence when present
+ T="$AI_STATE.$$"; if [ -f "$AI_STATE" ]; then grep -v '^root_domain=' "$AI_STATE" 2>/dev/null > "$T" || :; else : > "$T"; fi; printf 'root_domain=%s\ncellular_confidence=%s\ncellular_state_epoch=%s\n' "$DOMAIN" "$CCONF" "$(ckv epoch)" >> "$T"; chmod 600 "$T"; mv "$T" "$AI_STATE"; }
 load_policy(){ "$LOCALAI" compile >/dev/null 2>&1 || return 1; DOMAIN="$(kv domain)"; SOURCE="$(kv source)"; A1="$(kv action1)"; A2="$(kv action2)"; A3="$(kv action3)"; VW="$(kv verify_wan)"; VS="$(kv verify_service)"; VM="$(kv verify_modem)"; valid_action "$A1" && valid_action "$A2" && valid_action "$A3" || return 1; case "$VW:$VS:$VM" in *[!0-9:]*|'') return 1;; esac; }
 record(){ [ -x "$LOCALAI" ] && "$LOCALAI" record "$DOMAIN" "$1" "$2" "$3" >/dev/null 2>&1; }
 wait_for_internet(){ N="$1"; I=0; while [ "$I" -lt "$N" ]; do probe && return 0; sleep 2; I=$((I+2)); done; return 1; }
 action_wait(){ case "$1" in WAN_RECONNECT) echo "$VW";; DNSMASQ_RESTART|NETIFD_RESTART) echo "$VS";; MODEM_REBOOT) echo "$VM";; *) echo 0;; esac; }
-run_step(){ A="$1"; [ "$A" = NONE ] && return 1; W="$(action_wait "$A")"; ROOT_DOMAIN="$DOMAIN"; CUR=RECOVERING; LAST_ACTION="$A"; broker_execute WATCHDOG "$A" || return 1; wait_for_internet "$W" || { broker_log WATCHDOG "$A" FAILED ACTION_WINDOW_EXPIRED; return 1; }; broker_verify_result WATCHDOG "$A" >/dev/null 2>&1 || true; return 0; }
-LAST_ACTION=NONE; DOMAIN=UNKNOWN; SOURCE=LOCAL_AI; GWSTATE=UNKNOWN; write_state STANDBY
+run_step(){ A="$1"; [ "$A" = NONE ] && return 1; W="$(action_wait "$A")"; ROOT_DOMAIN="$DOMAIN"; CUR=RECOVERING; LAST_ACTION="$A"; broker_execute WATCHDOG "$A" || return 1; wait_for_internet "$W" && { broker_verify_result WATCHDOG "$A" >/dev/null 2>&1 || true; return 0; }; broker_log WATCHDOG "$A" FAILED ACTION_WINDOW_EXPIRED; return 1; }
+LAST_ACTION=NONE; DOMAIN=UNKNOWN; SOURCE=LOCAL_AI; CCONF=0; write_state STANDBY
 while :; do
  if probe; then sleep "$SLEEP"; continue; fi
- START="$(date +%s)"; gateway && GWSTATE=UP || GWSTATE=DOWN; write_state TRIGGERED
- # Fast confirmation filters a single lost probe without delaying real outage materially.
+ START="$(date +%s)"; write_state TRIGGERED
  sleep 1; if probe; then write_state STANDBY; continue; fi
+ # Capture the modem/provider state BEFORE any recovery mutates evidence.
+ if refresh_cellular; then SOURCE=CELLULAR_STATE_ENGINE; else DOMAIN=UNKNOWN; CCONF=0; SOURCE=SAFE_FALLBACK; fi
  load_policy || { DOMAIN=UNKNOWN; SOURCE=SAFE_FALLBACK; A1=WAN_RECONNECT; A2=NETIFD_RESTART; A3=MODEM_REBOOT; VW=12; VS=20; VM=120; }
  write_state RECOVERING; SUCCESS=0
  for STEP in 1 2 3; do
   case "$STEP" in 1) A="$A1";; 2) A="$A2";; 3) A="$A3";; esac
   [ "$A" = NONE ] && continue
-  if run_step "$A"; then MS=$((($(date +%s)-START)*1000)); record "$A" SUCCESS "$MS"; SUCCESS=1; break; else MS=$((($(date +%s)-START)*1000)); record "$A" FAILED "$MS"; fi
+  BEFORE="$DOMAIN"
+  if run_step "$A"; then MS=$((($(date +%s)-START)*1000)); record "$A" SUCCESS "$MS"; SUCCESS=1; break; fi
+  MS=$((($(date +%s)-START)*1000)); record "$A" FAILED "$MS"
+  # Re-observe after each failed action. Never continue a stale recovery sequence blindly.
+  if refresh_cellular; then load_policy >/dev/null 2>&1 || true; fi
  done
- # Never block forever. Continue rapid observation for a bounded late-recovery window.
- if [ "$SUCCESS" = 0 ] && wait_for_internet "$MAX_RECOVERY_WAIT"; then MS=$((($(date +%s)-START)*1000)); record "$LAST_ACTION" DELAYED_RECOVERY "$MS"; SUCCESS=1; fi
- if [ "$SUCCESS" = 1 ]; then write_state RECOVERED; sleep 1; else write_state OUTAGE_UNRESOLVED; sleep 2; fi
+ if [ "$SUCCESS" = 0 ] && wait_for_internet "$MAX_RECOVERY_WAIT"; then MS=$((($(date +%s)-START)*1000)); refresh_cellular >/dev/null 2>&1 || true; record "$LAST_ACTION" DELAYED_RECOVERY "$MS"; SUCCESS=1; fi
+ if [ "$SUCCESS" = 1 ]; then refresh_cellular >/dev/null 2>&1 || true; write_state RECOVERED; sleep 1; else write_state OUTAGE_UNRESOLVED; sleep 2; fi
 done
