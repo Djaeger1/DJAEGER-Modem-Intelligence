@@ -1,15 +1,10 @@
 # DJAEGER Provider Policy: XL / XLSMART
-# Purpose: operational guardrails for lawful, stability-first cellular recovery.
-# This is a summarized machine-readable engineering policy, not a copy of provider terms.
+# Operational guardrails for lawful, stability-first cellular autonomous control.
 provider=XL
 plmn=51011
-policy_version=1
-
-# Official terms source. Re-check periodically because XL states terms may change.
+policy_version=2
 official_terms=https://www.xl.co.id/id/syarat-dan-ketentuan
 terms_dynamic=1
-
-# Core operational principles derived from official terms and DJAEGER safety requirements.
 usage_scope=PERSONAL_INDIVIDUAL
 respect_provider_network=1
 avoid_network_disruption=1
@@ -18,10 +13,6 @@ avoid_security_or_capacity_interference=1
 no_resale_without_provider_permission=1
 no_illegal_use=1
 
-# DJAEGER recovery guardrails.
-# Recovery may restore the subscriber's legitimate modem/session, but must not attempt
-# identity alteration, access-control bypass, provider restriction evasion, or actions
-# intended to interfere with XL infrastructure.
 allow_registration_observation=1
 allow_plmn_observation=1
 allow_signal_observation=1
@@ -32,6 +23,19 @@ allow_openwrt_recovery=1
 allow_provider_behavior_learning=1
 allow_policy_adaptation=1
 
+# Adaptive Connection Governor: DJAEGER may control local throughput only when measured
+# evidence indicates doing so improves availability/session stability/latency/loss.
+allow_local_traffic_governor=1
+allow_adaptive_bandwidth_limit=1
+allow_gradual_bandwidth_restore=1
+bandwidth_limit_requires_evidence=1
+bandwidth_limit_must_be_reversible=1
+bandwidth_limit_must_not_be_used_for_provider_evasion=1
+throughput_priority=4
+latency_loss_priority=3
+session_stability_priority=2
+availability_priority=1
+
 forbid_imei_modification=1
 forbid_imsi_modification=1
 forbid_sim_identity_spoofing=1
@@ -40,10 +44,6 @@ forbid_provider_restriction_evasion=1
 forbid_network_disruption=1
 forbid_unbounded_recovery_loop=1
 forbid_arbitrary_cloud_root_execution=1
-
-# Provider conclusions require evidence. Failed ping alone is insufficient.
 provider_fault_requires_evidence=1
 
-# Operational goal: preserve legitimate registration/data-session availability while
-# minimizing unnecessary interventions and respecting provider/network constraints.
 goal=MAXIMUM_INTERNET_AVAILABILITY_WITH_MINIMUM_UNNECESSARY_INTERVENTION
