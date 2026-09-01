@@ -1,0 +1,69 @@
+name: OpenWrt Regression
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: POSIX shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' f; do
+            sh -n "$f"
+          done < <(find usr etc tests -type f -name '*.sh' -print0)
+          for f in install.sh install-watchdog.sh install-fast-watchdog.sh install-monitor-bridge.sh; do
+            [ ! -f "$f" ] || sh -n "$f"
+          done
+
+      - name: ShellCheck critical recovery paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          shellcheck -s sh -S error \
+            usr/sbin/djaeger-modemd \
+            usr/sbin/djaeger-watchdog \
+            usr/sbin/djaeger-fast-watchdog \
+            usr/lib/djaeger-modem/root-broker.sh \
+            usr/lib/djaeger-modem/recovery.sh \
+            usr/lib/djaeger-modem/local-ai-policy.sh
+
+      - name: Historical deterministic replay
+        run: sh tests/regression/replay-v1.sh
+
+      - name: Recovery authority contracts
+        run: sh tests/regression/recovery-authority-v4.sh .
+
+      - name: No competing direct recovery writers
+        shell: bash
+        run: |
+          set -euo pipefail
+          ! grep -nE '(^|[;&|[:space:]])ifup[[:space:]]+wan' usr/sbin/djaeger-watchdog usr/sbin/djaeger-fast-watchdog
+          ! grep -n 'broker_execute' usr/sbin/djaeger-watchdog usr/sbin/djaeger-fast-watchdog
+          grep -n 'broker_execute LOCAL' usr/sbin/djaeger-modemd
+
+      - name: Required recovery contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -n 'broker_verify_result' usr/sbin/djaeger-modemd
+          grep -n 'recovery_learn()' usr/lib/djaeger-modem/recovery.sh
+          grep -n 'REGISTRATION_STUCK' usr/lib/djaeger-modem/root-broker.sh
+          grep -n 'MODEM_REBOOT' usr/sbin/djaeger-modemd
