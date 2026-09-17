@@ -27,6 +27,12 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Restore stable signing key
+        working-directory: facebook-ad-shield-526
+        run: |
+          base64 -d signing/djaeger-fb526-release.jks.b64 > signing/djaeger-fb526-release.jks
+          keytool -list -keystore signing/djaeger-fb526-release.jks -storepass djaeger526 -alias djaegerfb526 >/dev/null
+
       - name: Build debug APK
         working-directory: facebook-ad-shield-526
         run: gradle :app:assembleDebug --stacktrace
