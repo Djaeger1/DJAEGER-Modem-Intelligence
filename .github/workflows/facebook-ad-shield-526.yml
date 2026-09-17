@@ -1,0 +1,39 @@
+name: Facebook Ad Shield 526
+
+on:
+  push:
+    branches:
+      - facebook-ad-shield-526-shadow1
+    paths:
+      - 'facebook-ad-shield-526/**'
+      - '.github/workflows/facebook-ad-shield-526.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        working-directory: facebook-ad-shield-526
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: DJAEGER-Facebook-Ad-Shield-526-SHADOW1
+          path: facebook-ad-shield-526/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
