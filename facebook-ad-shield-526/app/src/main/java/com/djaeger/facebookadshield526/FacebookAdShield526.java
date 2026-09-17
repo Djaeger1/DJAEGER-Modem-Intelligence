@@ -9,13 +9,20 @@ import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.widget.TextView;
 
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -24,18 +31,21 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * DJAEGER Facebook Ad Shield 526 - SHADOW1.
+ * DJAEGER Facebook Ad Shield 526 - SHADOW2.
  *
- * Deliberately scoped to com.facebook.katana 526.1.0.66.75 only.
- * It does NOT touch DNS, networking, account/session data or other apps.
+ * Strict scope: com.facebook.katana 526.1.0.66.75 only.
+ * No DNS/network/account/session modification.
+ *
+ * SHADOW2 adds a Litho/accessibility path because Facebook 526 can render the
+ * visible "Bersponsor" label through virtual accessibility nodes instead of
+ * Android TextView objects.  SHADOW1 therefore missed real sponsored units.
  *
  * Strategy:
- *  1) detect the visible sponsored marker (Indonesian/English),
- *  2) collapse the containing feed unit, preferring Litho/list-row roots,
- *  3) run a few bounded scans after Activity resume as a fallback.
- *
- * This is a UI-layer compatibility backport/failsafe, not a claim that the
- * upstream 576/578 structural hooks are valid on Facebook 526.
+ *  1) retain TextView/contentDescription hooks from SHADOW1,
+ *  2) query View.findViewsWithText as a cheap framework path,
+ *  3) inspect AccessibilityNodeInfo / AccessibilityNodeProvider virtual nodes,
+ *  4) run a low-frequency scan only while a Facebook Activity is resumed,
+ *  5) collapse the nearest plausible Litho/feed-row root, never the decor root.
  */
 public final class FacebookAdShield526 implements IXposedHookLoadPackage {
     private static final String TARGET_PACKAGE = "com.facebook.katana";
@@ -44,7 +54,12 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
 
     private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
     private static final Set<View> HIDDEN = Collections.newSetFromMap(new WeakHashMap<>());
+    private static final Map<Activity, Integer> ACTIVE_SCANS = Collections.synchronizedMap(new WeakHashMap<>());
+    private static final AtomicInteger NEXT_SCAN_TOKEN = new AtomicInteger(1);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
+    private static final long ACTIVE_SCAN_INTERVAL_MS = 900L;
+    private static final int MAX_TREE_NODES = 1400;
 
     @Override
     public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
@@ -63,7 +78,7 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
                 }
                 if (!INSTALLED.compareAndSet(false, true)) return;
                 installHooks();
-                XposedBridge.log(TAG + " SHADOW1 active on Facebook " + version);
+                XposedBridge.log(TAG + " SHADOW2 active on Facebook " + version);
             }
         });
     }
@@ -84,8 +99,7 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
             protected void afterHookedMethod(MethodHookParam param) {
                 if (!(param.thisObject instanceof TextView)) return;
                 TextView tv = (TextView) param.thisObject;
-                CharSequence text = tv.getText();
-                if (isSponsoredMarker(text)) queueHide(tv);
+                if (isSponsoredMarker(tv.getText())) queueHide(tv, "text");
             }
         };
 
@@ -105,8 +119,7 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     View v = (View) param.thisObject;
-                    CharSequence d = v.getContentDescription();
-                    if (isSponsoredMarker(d)) queueHide(v);
+                    if (isSponsoredMarker(v.getContentDescription())) queueHide(v, "contentDescription");
                 }
             });
         } catch (Throwable t) {
@@ -118,24 +131,72 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     Activity a = (Activity) param.thisObject;
-                    View decor = a.getWindow() == null ? null : a.getWindow().getDecorView();
-                    if (decor == null) return;
-                    // Bounded fallbacks only. No permanent polling loop.
-                    MAIN.postDelayed(() -> scanTree(decor, 0, new int[]{0}), 350);
-                    MAIN.postDelayed(() -> scanTree(decor, 0, new int[]{0}), 1200);
-                    MAIN.postDelayed(() -> scanTree(decor, 0, new int[]{0}), 3000);
+                    startActivityScanner(a);
                 }
             });
         } catch (Throwable t) {
             XposedBridge.log(TAG + " Activity.onResume hook unavailable: " + t);
         }
+
+        try {
+            XposedHelpers.findAndHookMethod(Activity.class, "onPause", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    Activity a = (Activity) param.thisObject;
+                    ACTIVE_SCANS.remove(a);
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + " Activity.onPause hook unavailable: " + t);
+        }
+    }
+
+    private static void startActivityScanner(Activity activity) {
+        if (activity == null) return;
+        int token = NEXT_SCAN_TOKEN.incrementAndGet();
+        ACTIVE_SCANS.put(activity, token);
+        WeakReference<Activity> ref = new WeakReference<>(activity);
+
+        Runnable loop = new Runnable() {
+            @Override
+            public void run() {
+                Activity a = ref.get();
+                if (a == null || a.isFinishing()) return;
+                Integer current = ACTIVE_SCANS.get(a);
+                if (current == null || current != token) return;
+
+                View decor = a.getWindow() == null ? null : a.getWindow().getDecorView();
+                if (decor != null && decor.isAttachedToWindow()) {
+                    scanActivityRoot(decor);
+                }
+                MAIN.postDelayed(this, ACTIVE_SCAN_INTERVAL_MS);
+            }
+        };
+
+        MAIN.postDelayed(loop, 250L);
+    }
+
+    private static void scanActivityRoot(View decor) {
+        // Android framework path.  Some custom views expose their visible text
+        // here even when they are not TextView instances.
+        try {
+            ArrayList<View> hits = new ArrayList<>();
+            int flags = View.FIND_VIEWS_WITH_TEXT | View.FIND_VIEWS_WITH_CONTENT_DESCRIPTION;
+            decor.findViewsWithText(hits, "Bersponsor", flags);
+            decor.findViewsWithText(hits, "Sponsored", flags);
+            for (View hit : hits) {
+                if (hit != null && hit != decor) queueHide(hit, "findViewsWithText");
+            }
+        } catch (Throwable ignored) {
+        }
+
+        scanTree(decor, 0, new int[]{0});
     }
 
     private static boolean isSponsoredMarker(CharSequence cs) {
         if (cs == null) return false;
         String s = cs.toString().trim();
-        // Avoid treating a long post body that merely mentions the word as an ad marker.
-        if (s.isEmpty() || s.length() > 80) return false;
+        if (s.isEmpty() || s.length() > 96) return false;
         String n = s.toLowerCase(Locale.ROOT)
                 .replace('\u00a0', ' ')
                 .replace("•", "·")
@@ -148,22 +209,24 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
                 || n.startsWith("sponsored  ·");
     }
 
-    private static void queueHide(final View marker) {
+    private static void queueHide(final View marker, final String source) {
         if (marker == null) return;
-        marker.post(() -> hideContainingUnit(marker));
-        marker.postDelayed(() -> hideContainingUnit(marker), 120);
+        marker.post(() -> hideContainingUnit(marker, source));
+        marker.postDelayed(() -> hideContainingUnit(marker, source), 120L);
     }
 
-    private static void hideContainingUnit(View marker) {
-        if (!marker.isAttachedToWindow()) return;
+    private static void hideContainingUnit(View marker, String source) {
+        if (marker == null || !marker.isAttachedToWindow()) return;
         View root = findFeedUnitRoot(marker);
-        if (root == null) return;
+        if (root == null || root == marker.getRootView()) return;
+
         synchronized (HIDDEN) {
             if (HIDDEN.contains(root)) return;
             HIDDEN.add(root);
         }
         collapse(root);
-        XposedBridge.log(TAG + " hidden sponsored unit root=" + root.getClass().getName());
+        XposedBridge.log(TAG + " hidden sponsored unit source=" + source
+                + " root=" + root.getClass().getName());
     }
 
     private static View findFeedUnitRoot(View marker) {
@@ -171,16 +234,20 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
         View sizeFallback = null;
         View rootView = marker.getRootView();
         int screenWidth = rootView == null ? 0 : rootView.getWidth();
+        int screenHeight = rootView == null ? 0 : rootView.getHeight();
         float density = marker.getResources().getDisplayMetrics().density;
-        int minCardHeight = (int) (160f * density);
+        int minCardHeight = (int) (140f * density);
 
-        for (int depth = 0; depth < 16 && current != null; depth++) {
+        for (int depth = 0; depth < 18 && current != null; depth++) {
             String cn = current.getClass().getName().toLowerCase(Locale.ROOT);
-            if (cn.contains("lithoview")) return current;
+            if (cn.contains("lithoview") && current.getHeight() >= minCardHeight) {
+                return current;
+            }
 
-            if (depth >= 2 && screenWidth > 0
-                    && current.getWidth() >= (int) (screenWidth * 0.82f)
+            if (depth >= 1 && screenWidth > 0
+                    && current.getWidth() >= (int) (screenWidth * 0.80f)
                     && current.getHeight() >= minCardHeight
+                    && (screenHeight <= 0 || current.getHeight() < (int) (screenHeight * 0.90f))
                     && sizeFallback == null) {
                 sizeFallback = current;
             }
@@ -190,7 +257,8 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
             View parentView = (View) parent;
             String pn = parentView.getClass().getName().toLowerCase(Locale.ROOT);
             if (pn.contains("recyclerview") || pn.contains("listview") || pn.contains("viewpager")) {
-                return current;
+                if (current != rootView && current.getHeight() >= minCardHeight) return current;
+                break;
             }
             current = parentView;
         }
@@ -218,25 +286,89 @@ public final class FacebookAdShield526 implements IXposedHookLoadPackage {
         }
     }
 
-    private static void scanTree(View v, int depth, int[] count) {
-        if (v == null || depth > 24 || count[0]++ > 1200) return;
-        if (v instanceof TextView) {
-            CharSequence text = ((TextView) v).getText();
-            if (isSponsoredMarker(text)) {
-                hideContainingUnit(v);
-                return;
+    private static boolean accessibilitySaysSponsored(View v) {
+        // Avoid ever using a whole-screen host as the hide target.
+        if (v == null || v == v.getRootView()) return false;
+
+        try {
+            AccessibilityNodeInfo info = v.createAccessibilityNodeInfo();
+            if (info != null) {
+                try {
+                    if (isSponsoredMarker(info.getText()) || isSponsoredMarker(info.getContentDescription())) {
+                        return true;
+                    }
+                } finally {
+                    info.recycle();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+
+        try {
+            AccessibilityNodeProvider provider = v.getAccessibilityNodeProvider();
+            if (provider == null) return false;
+
+            // Litho commonly exposes text as virtual accessibility children.
+            if (providerContains(provider, "Bersponsor")) return true;
+            if (providerContains(provider, "Sponsored")) return true;
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    private static boolean providerContains(AccessibilityNodeProvider provider, String text) {
+        List<AccessibilityNodeInfo> list = null;
+        try {
+            list = provider.findAccessibilityNodeInfosByText(text, AccessibilityNodeProvider.HOST_VIEW_ID);
+            return list != null && !list.isEmpty();
+        } catch (Throwable ignored) {
+            return false;
+        } finally {
+            if (list != null) {
+                for (AccessibilityNodeInfo info : list) {
+                    if (info != null) {
+                        try { info.recycle(); } catch (Throwable ignored) {}
+                    }
+                }
             }
         }
-        if (isSponsoredMarker(v.getContentDescription())) {
-            hideContainingUnit(v);
+    }
+
+    private static boolean plausibleAccessibilityHost(View v) {
+        if (v == null || v == v.getRootView()) return false;
+        String cn = v.getClass().getName().toLowerCase(Locale.ROOT);
+        if (cn.contains("litho")) return true;
+
+        View root = v.getRootView();
+        int sw = root == null ? 0 : root.getWidth();
+        int sh = root == null ? 0 : root.getHeight();
+        if (sw <= 0 || sh <= 0) return true;
+        return v.getWidth() >= (int) (sw * 0.55f) && v.getHeight() < (int) (sh * 0.90f);
+    }
+
+    private static void scanTree(View v, int depth, int[] count) {
+        if (v == null || depth > 26 || count[0]++ > MAX_TREE_NODES) return;
+
+        if (v instanceof TextView && isSponsoredMarker(((TextView) v).getText())) {
+            hideContainingUnit(v, "tree-text");
             return;
         }
+        if (isSponsoredMarker(v.getContentDescription())) {
+            hideContainingUnit(v, "tree-contentDescription");
+            return;
+        }
+
+        if (plausibleAccessibilityHost(v) && accessibilitySaysSponsored(v)) {
+            hideContainingUnit(v, "accessibility-virtual-node");
+            return;
+        }
+
         if (v instanceof ViewGroup) {
             ViewGroup g = (ViewGroup) v;
             int n = g.getChildCount();
             for (int i = 0; i < n; i++) {
                 scanTree(g.getChildAt(i), depth + 1, count);
-                if (count[0] > 1200) return;
+                if (count[0] > MAX_TREE_NODES) return;
             }
         }
     }
