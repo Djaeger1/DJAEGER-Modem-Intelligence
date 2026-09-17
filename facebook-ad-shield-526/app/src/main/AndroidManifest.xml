@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
         android:allowBackup="false"
+        android:icon="@drawable/ic_djaeger_ad_shield"
+        android:roundIcon="@drawable/ic_djaeger_ad_shield"
         android:label="DJAEGER Facebook Ad Shield 526"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
