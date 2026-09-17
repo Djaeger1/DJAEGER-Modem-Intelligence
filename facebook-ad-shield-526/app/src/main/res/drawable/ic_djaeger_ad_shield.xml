@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Premium deep-blue rounded app tile -->
+    <path
+        android:fillColor="#0A4BB8"
+        android:pathData="M18,4 H90 C98,4 104,10 104,18 V90 C104,98 98,104 90,104 H18 C10,104 4,98 4,90 V18 C4,10 10,4 18,4 Z" />
+
+    <!-- Subtle lighter panel for depth -->
+    <path
+        android:fillColor="#1677E8"
+        android:fillAlpha="0.72"
+        android:pathData="M12,19 C31,7 71,6 96,18 V42 C76,31 38,30 12,43 Z" />
+
+    <!-- DJAEGER protection shield -->
+    <path
+        android:fillColor="#0753C7"
+        android:strokeColor="#F5FAFF"
+        android:strokeWidth="4"
+        android:strokeLineJoin="round"
+        android:pathData="M54,16 L82,28 V49 C82,68 70,82 54,92 C38,82 26,68 26,49 V28 Z" />
+
+    <!-- Inner shield highlight -->
+    <path
+        android:fillColor="#1388F2"
+        android:fillAlpha="0.58"
+        android:pathData="M54,23 L75,32 V49 C75,63 66,74 54,82 C42,74 33,63 33,49 V32 Z" />
+
+    <!-- Stylized DJAEGER D monogram -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M42,35 H56 C69,35 76,43 76,54 C76,66 68,74 56,74 H42 Z M50,43 V66 H56 C63,66 68,62 68,54 C68,47 63,43 56,43 Z" />
+
+    <!-- No-ad badge -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#FF3B45"
+        android:strokeWidth="4"
+        android:pathData="M83,63 C92,63 99,70 99,79 C99,88 92,95 83,95 C74,95 67,88 67,79 C67,70 74,63 83,63 Z" />
+
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FF3B45"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M72,68 L94,90" />
+</vector>
