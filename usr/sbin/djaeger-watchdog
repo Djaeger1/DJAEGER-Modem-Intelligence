@@ -1,23 +1,22 @@
 #!/bin/sh
-# DJAEGER Fast Watchdog - local-first connectivity reflex.
-# Safe scope: detect/confirm outage and request WAN recovery only.
+# DJAEGER Connectivity Watchdog v8 - DETECTION ONLY.
+# Recovery authority belongs exclusively to djaeger-modemd / Root Broker.
+# This process must never call ifup, restart network services, or reboot modem.
 STATE=/tmp/djaeger-watchdog.state
 LOCK=/tmp/djaeger-watchdog.lock
-GW="$(uci -q get djaeger_modem.main.gateway)"; [ -n "$GW" ] || GW=192.168.8.1
 INTERVAL=2
 CONFIRM_DELAY=2
+umask 077
 mkdir "$LOCK" 2>/dev/null || exit 73
 trap 'rm -rf "$LOCK"' EXIT INT TERM
 probe_net(){ ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 || ping -c1 -W1 8.8.8.8 >/dev/null 2>&1; }
-write_state(){ { echo "updated=$(date +%s)"; echo "state=$1"; echo "last_action=$2"; } > "$STATE.tmp"; chmod 600 "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
+write_state(){ { echo "updated=$(date +%s)"; echo "state=$1"; echo "last_action=NONE"; echo "authority=OBSERVER_ONLY"; } > "$STATE.tmp"; chmod 600 "$STATE.tmp"; mv "$STATE.tmp" "$STATE"; }
 while :; do
-  if probe_net; then write_state HEALTHY NONE; sleep "$INTERVAL"; continue; fi
-  write_state SUSPECT NONE
+  if probe_net; then write_state HEALTHY; sleep "$INTERVAL"; continue; fi
+  write_state SUSPECT
   sleep "$CONFIRM_DELAY"
-  if probe_net; then write_state HEALTHY TRANSIENT; continue; fi
-  write_state OUTAGE WAN_RECONNECT
-  ifup wan >/dev/null 2>&1 || true
-  sleep 4
-  if probe_net; then write_state RECOVERED WAN_RECONNECT; else write_state OUTAGE WAN_RECONNECT_FAILED; fi
+  if probe_net; then write_state HEALTHY; continue; fi
+  write_state OUTAGE_CONFIRMED
+  # Intentionally no recovery action here. djaeger-modemd owns recovery.
   sleep "$INTERVAL"
 done
