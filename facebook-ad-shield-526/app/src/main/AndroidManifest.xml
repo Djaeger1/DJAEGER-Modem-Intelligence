@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:allowBackup="false"
+        android:label="DJAEGER Facebook Ad Shield 526"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="SHADOW1: sponsored-feed guard for Facebook 526.1.0.66.75 only" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="93" />
+    </application>
+</manifest>
