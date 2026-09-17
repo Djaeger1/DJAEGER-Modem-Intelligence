@@ -13,7 +13,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="SHADOW1: sponsored-feed guard for Facebook 526.1.0.66.75 only" />
+            android:value="SHADOW2: Litho/accessibility sponsored-feed guard for Facebook 526.1.0.66.75 only" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
