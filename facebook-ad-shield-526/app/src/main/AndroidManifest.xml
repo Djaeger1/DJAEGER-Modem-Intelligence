@@ -13,7 +13,7 @@
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="SHADOW2-R1: Facebook 526 sponsored-feed guard; recommended scope is Facebook only" />
+            android:value="SHADOW3: structural Litho/GraphQL sponsored-feed guard for Facebook 526.1.0.66.75" />
         <meta-data
             android:name="xposedminversion"
             android:value="93" />
