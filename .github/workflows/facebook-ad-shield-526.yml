@@ -3,7 +3,7 @@ name: Facebook Ad Shield 526
 on:
   push:
     branches:
-      - facebook-ad-shield-526-shadow1
+      - facebook-ad-shield-526-shadow2
     paths:
       - 'facebook-ad-shield-526/**'
       - '.github/workflows/facebook-ad-shield-526.yml'
@@ -34,6 +34,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: DJAEGER-Facebook-Ad-Shield-526-SHADOW1
+          name: DJAEGER-Facebook-Ad-Shield-526-SHADOW2
           path: facebook-ad-shield-526/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
