@@ -1,0 +1,21 @@
+! DJAEGER Facebook / Meta MEDIUM blocklist for AdGuard Home
+! DNS-level filter intended to reduce Meta/Facebook tracking without blocking core Facebook services.
+! Generated 2026-09-17
+
+||connect.facebook.net^
+||pixel.facebook.com^
+||analytics.facebook.com^
+
+! Intentionally NOT blocked:
+! facebook.com
+! www.facebook.com
+! m.facebook.com
+! graph.facebook.com
+! graph-video.facebook.com
+! fbcdn.net
+! fbsbx.com
+! messenger.com
+! edge-mqtt.facebook.com
+!
+! Note: DNS filtering cannot reliably remove all Sponsored posts inside the Facebook app,
+! because ads and normal feed content can share the same Meta domains/CDNs.
